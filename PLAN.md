@@ -347,7 +347,7 @@ Recommended dependencies:
 
 ### Phase 0 — integration spikes
 
-**Current scope:** the repository contains only an initial Phase 0 tracer slice: the CLI shell, pinned-server compatibility probe, recipe fetch/extraction path, and source findings. This is not completion of every Phase 0 item. In particular, the backward-compatible `structuredContent` patch for `score_recipes` and `generate_shopping_list`, its contract tests, and representative saved HTML fixtures are still pending.
+**Current scope:** the repository contains Phase 0 tracer slices: the CLI shell, pinned-server compatibility probe, recipe fetch/extraction path, source findings, and the backward-compatible `structuredContent` patch and contract tests for `score_recipes` and `generate_shopping_list`. Representative saved HTML fixtures are still pending, so Phase 0 is not yet complete.
 
 - Initialize the Bun/TypeScript CLI.
 - Pin and build TilbudsTrolden.

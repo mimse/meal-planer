@@ -1,18 +1,20 @@
 # Phase 0 integration findings
 
-This document records an initial Phase 0 tracer slice, not completion of all Phase 0 work in `PLAN.md`. The pinned `structuredContent` compatibility patch for `score_recipes` and `generate_shopping_list` and its contract tests remain pending; the current adapter intentionally handles the upstream 0.5.3 text response only at its boundary.
+This document records Phase 0 tracer slices, not completion of all Phase 0 work in `PLAN.md`. The structured MCP response contract is complete; representative saved recipe fixtures remain pending.
 
 Verified on 2026-09-27. Live offer contents are time-sensitive; adapter behavior and identifiers are pinned where noted.
 
 ## TilbudsTrolden MCP
 
-Pinned Git submodule: `vendor/tilbudstrolden-mcp` at commit `ad18454bb9bb187f7ac51b7ec9f6a0d22555d5cb` (server version 0.5.3).
+Pinned Git submodule: `vendor/tilbudstrolden-mcp` at fork commit `cf01aac46efb5808d2cdffd6c2c19b96bb0ceabf`, based on upstream commit `ad18454bb9bb187f7ac51b7ec9f6a0d22555d5cb` (server version 0.5.3).
 
 Verification results:
 
-- `npm ci`, build, and all 404 upstream Vitest tests pass under Node 24.
+- `npm ci`, build, and all 405 provider Vitest tests pass under Node 24.
 - The Meal Planer MCP client connects over stdio and sees 18 tools.
 - Required tools are present: `list_stores`, `update_household`, `update_pantry`, `add_recipe`, `score_recipes`, and `generate_shopping_list`.
+- `score_recipes` and `generate_shopping_list` advertise validated output schemas and return structured data alongside unchanged text content.
+- The Meal Planer adapter validates the advertised schemas and every received structured field, preserves the provider text, and stamps receipt time locally.
 - A live `search_deals` call for `mælk` returned five offers.
 - The default curated `list_stores` response contains REMA 1000 and Netto but omits SuperBrugsen.
 - `list_stores {"all":true}` returns the full Danish directory and resolves the configured stores as:
@@ -22,7 +24,7 @@ Verification results:
 
 The application must query the full Danish directory during setup instead of relying on the curated default list. Dealer IDs remain runtime-discovered values; the values above are evidence, not hard-coded configuration.
 
-The pinned server returns human-readable text in MCP `content`. Text parsing remains isolated inside the TilbudsTrolden adapter until structured responses are available.
+The pinned server retains human-readable MCP `content` for compatibility. Meal Planer consumes `structuredContent` for scoring and shopping-list data and does not parse the text into domain values.
 
 ## Recipe-source probes
 

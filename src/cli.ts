@@ -73,9 +73,21 @@ integrations
           : `Missing required tools: ${result.missingRequiredTools.join(", ")}`,
       );
       if (result.incompatibleToolSchemas.length > 0) {
-        console.log(`Incompatible tool schemas: ${result.incompatibleToolSchemas
+        console.log(`Incompatible tool input schemas: ${result.incompatibleToolSchemas
           .map(({ name, issues }) => `${name} (${issues.join("; ")})`)
           .join(", ")}`);
+      }
+      if (result.missingRequiredToolOutputSchemas.length > 0) {
+        console.log(
+          `Missing required tool output schemas: ${result.missingRequiredToolOutputSchemas.join(", ")}`,
+        );
+      }
+      if (result.incompatibleToolOutputSchemas.length > 0) {
+        console.log(`Incompatible tool output schemas: ${result.incompatibleToolOutputSchemas
+          .map(({ name, issues }) => `${name} (${issues.join("; ")})`)
+          .join(", ")}`);
+      } else if (result.missingRequiredToolOutputSchemas.length === 0) {
+        console.log("All required tool output schemas are compatible.");
       }
     }
 

@@ -85,6 +85,40 @@ test("recipes inspect rejects private network targets", async () => {
   expect(stderr).toContain("not publicly routable");
 });
 
+test("integrations verify-deals reports output-schema compatibility in human-readable output", async () => {
+  const dataDirectory = await mkdtemp(join(tmpdir(), "meal-planer-cli-mcp-"));
+
+  try {
+    const process = Bun.spawn([
+      "bun",
+      "run",
+      "src/cli.ts",
+      "integrations",
+      "verify-deals",
+      "--server",
+      "vendor/tilbudstrolden-mcp/dist/server.js",
+      "--data",
+      join(dataDirectory, "tilbudstrolden.json"),
+    ], {
+      cwd: projectRoot,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    const [exitCode, stdout, stderr] = await Promise.all([
+      process.exited,
+      new Response(process.stdout).text(),
+      new Response(process.stderr).text(),
+    ]);
+
+    expect(stderr).toBe("");
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("All required tool output schemas are compatible.");
+  } finally {
+    await rm(dataDirectory, { recursive: true, force: true });
+  }
+});
+
 test("integrations verify-deals reports pinned-server compatibility", async () => {
   const dataDirectory = await mkdtemp(join(tmpdir(), "meal-planer-cli-mcp-"));
 
@@ -122,6 +156,8 @@ test("integrations verify-deals reports pinned-server compatibility", async () =
       toolCount: 18,
       missingRequiredTools: [],
       incompatibleToolSchemas: [],
+      missingRequiredToolOutputSchemas: [],
+      incompatibleToolOutputSchemas: [],
     });
   } finally {
     await rm(dataDirectory, { recursive: true, force: true });
