@@ -2,7 +2,7 @@
 
 A local, family-aware meal-planning CLI for Denmark, built with TypeScript and Bun.
 
-The implementation is starting with Phase 0 tracer slices for the integration risks documented in `PLAN.md`: recipe extraction and the pinned TilbudsTrolden MCP boundary. The provider fork now exposes contract-tested structured scoring and shopping-list responses alongside its legacy text. Representative recipe fixtures remain before Phase 0 is complete.
+The Phase 0 integration-evidence milestone documented in `PLAN.md` is complete: the repository contains working recipe and pinned TilbudsTrolden MCP tracer paths, contract-tested structured provider responses, and compact deterministic fixtures for all six built-in recipe sources. Production source adapters, persistence, and meal planning remain later-phase work.
 
 ## Development
 

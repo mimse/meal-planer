@@ -1,6 +1,6 @@
 # Phase 0 integration findings
 
-This document records Phase 0 tracer slices, not completion of all Phase 0 work in `PLAN.md`. The structured MCP response contract is complete; representative saved recipe fixtures remain pending.
+This document records the completed Phase 0 integration-evidence milestone in `PLAN.md`: the tracer CLI paths, pinned MCP contract, source probes, and deterministic representative recipe fixtures. Production ingestion adapters, persistence, and planning remain later-phase work.
 
 Verified on 2026-09-27. Live offer contents are time-sensitive; adapter behavior and identifiers are pinned where noted.
 
@@ -40,6 +40,8 @@ All six representative pages and their public discovery endpoints returned HTTP 
 | Mummum | https://mummum.dk/opskrift-paa-nemme-croutoner/ | production `sitemap_index.xml` → `post-sitemap*.xml` | generic Recipe JSON-LD |
 
 The built-in registry in `src/adapters/recipes/sources.ts` records these adapter decisions. The generic extractor was also exercised live against the Gourministeriet page: 4 servings, 60 total minutes, 22 ingredient lines, and 8 instruction steps were extracted.
+
+Compact reduced snapshots live in `tests/fixtures/recipes/`, with capture provenance recorded alongside them. Fixture contracts bind every snapshot to its built-in registry entry and extraction kind. The four JSON-LD sources run through `extractRecipeJsonLd`; Valdemarsro's single Recipe microdata scope and SPIS BEDRE's grouped Inertia payload are validated as deterministic evidence only. Their production adapters remain Phase 2 work.
 
 ## Reproduction
 
