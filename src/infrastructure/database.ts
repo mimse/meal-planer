@@ -4,7 +4,7 @@ import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { readValidatedMigrationLedger, runMigrations } from "./migrations";
 
-const REQUIRED_APPLICATION_TABLES = [
+const REQUIRED_CONFIGURATION_TABLES = [
   "day_profiles",
   "household_members",
   "household_rules",
@@ -13,17 +13,29 @@ const REQUIRED_APPLICATION_TABLES = [
   "recipe_sources",
   "schema_migrations",
 ] as const;
+const REQUIRED_RECIPE_TABLES = [
+  "recipes",
+  "recipe_ingredients",
+  "recipe_instructions",
+] as const;
 
 function assertApplicationDatabase(database: Database): void {
   const tableNames = new Set(database
     .query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table'")
     .all()
     .map(({ name }) => name));
-  if (REQUIRED_APPLICATION_TABLES.some((tableName) => !tableNames.has(tableName))) {
+  if (REQUIRED_CONFIGURATION_TABLES.some((tableName) => !tableNames.has(tableName))) {
     throw new Error("Family configuration does not exist. Run mealplan setup first.");
   }
-  if (readValidatedMigrationLedger(database).length === 0) {
+  const appliedMigrations = readValidatedMigrationLedger(database);
+  if (appliedMigrations.length === 0) {
     throw new Error("Application database migration ledger is empty");
+  }
+  if (
+    appliedMigrations.some(({ version }) => version >= 2)
+    && REQUIRED_RECIPE_TABLES.some((tableName) => !tableNames.has(tableName))
+  ) {
+    throw new Error("Family configuration does not exist. Run mealplan setup first.");
   }
 }
 

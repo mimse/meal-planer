@@ -99,6 +99,14 @@ export function removeRecipeSource(database: Database, input: unknown): void {
   const sources = createConfigurationRepositories(database).recipeSources;
   database.transaction(() => {
     if (sources.get(id) === null) throw new Error(`Recipe source does not exist: ${id}`);
+    const referencedRecipes = database.query<{ count: number }, [string]>(
+      "SELECT COUNT(*) AS count FROM recipes WHERE source_id = ?",
+    ).get(id)?.count ?? 0;
+    if (referencedRecipes > 0) {
+      throw new Error(
+        `Cannot remove recipe source ${id} while ${referencedRecipes} imported recipe${referencedRecipes === 1 ? "" : "s"} references it; disable it instead`,
+      );
+    }
     sources.remove(id);
   }).immediate();
 }

@@ -156,14 +156,43 @@ export function applySetup(database: Database, input: SetupConfiguration): void 
   const configuration = validateSetupConfiguration(input);
 
   database.transaction(() => {
+    const repositories = createConfigurationRepositories(database);
+    const desiredSourcesById = new Map(configuration.recipeSources.map((source) => [source.id, source]));
+    const referencedSources = database.query<{ id: string; baseUrl: string }, []>(`
+      SELECT DISTINCT recipe_sources.id, recipe_sources.base_url AS baseUrl
+      FROM recipe_sources
+      INNER JOIN recipes ON recipes.source_id = recipe_sources.id
+    `).all();
+    for (const existingSource of referencedSources) {
+      const desiredSource = desiredSourcesById.get(existingSource.id);
+      if (
+        desiredSource !== undefined
+        && new URL(existingSource.baseUrl).href !== new URL(desiredSource.baseUrl).href
+      ) {
+        throw new Error(
+          `Cannot change base URL for referenced recipe source ${existingSource.id} from ${existingSource.baseUrl} to ${desiredSource.baseUrl}`,
+        );
+      }
+    }
+
+    for (const source of repositories.recipeSources.list()) {
+      if (desiredSourcesById.has(source.id)) continue;
+      const referencedRecipes = database.query<{ count: number }, [string]>(
+        "SELECT COUNT(*) AS count FROM recipes WHERE source_id = ?",
+      ).get(source.id)?.count ?? 0;
+      if (referencedRecipes > 0) {
+        repositories.recipeSources.upsert({ ...source, enabled: false });
+      } else {
+        repositories.recipeSources.remove(source.id);
+      }
+    }
+
     database.exec(`
       DELETE FROM household_rules;
       DELETE FROM household_members;
       DELETE FROM day_profiles;
       DELETE FROM preferred_stores;
-      DELETE FROM recipe_sources;
     `);
-    const repositories = createConfigurationRepositories(database);
     for (const member of configuration.members) repositories.householdMembers.upsert(member);
     for (const rule of configuration.rules) repositories.householdRules.upsert(rule);
     for (const profile of configuration.dayProfiles) repositories.dayProfiles.upsert(profile);

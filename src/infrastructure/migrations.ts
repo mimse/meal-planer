@@ -73,6 +73,82 @@ export const migrations: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 2,
+    name: "recipe ingestion persistence",
+    up(database) {
+      database.exec(`
+        CREATE TABLE recipes (
+          id TEXT PRIMARY KEY CHECK (length(id) = 71),
+          identity_key TEXT NOT NULL UNIQUE CHECK (length(identity_key) BETWEEN 1 AND 2200),
+          source_id TEXT NOT NULL CHECK (length(source_id) BETWEEN 1 AND 100)
+            REFERENCES recipe_sources(id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+          source_url TEXT NOT NULL CHECK (length(source_url) BETWEEN 1 AND 2048),
+          canonical_url TEXT NOT NULL CHECK (length(canonical_url) BETWEEN 1 AND 2048),
+          normalized_canonical_url TEXT NOT NULL CHECK (length(normalized_canonical_url) BETWEEN 1 AND 2048),
+          title TEXT NOT NULL CHECK (length(trim(title)) BETWEEN 1 AND 500),
+          normalized_title TEXT NOT NULL CHECK (length(normalized_title) BETWEEN 1 AND 500),
+          author TEXT CHECK (author IS NULL OR length(trim(author)) BETWEEN 1 AND 300),
+          servings REAL CHECK (servings IS NULL OR servings > 0 AND servings <= 1000000),
+          prep_minutes INTEGER CHECK (prep_minutes IS NULL OR prep_minutes BETWEEN 0 AND 525600),
+          cook_minutes INTEGER CHECK (cook_minutes IS NULL OR cook_minutes BETWEEN 0 AND 525600),
+          total_minutes INTEGER CHECK (total_minutes IS NULL OR total_minutes BETWEEN 0 AND 525600),
+          cuisine_tags TEXT NOT NULL CHECK (
+            length(cuisine_tags) <= 10000 AND json_valid(cuisine_tags) AND json_type(cuisine_tags) = 'array'
+          ),
+          protein_tag TEXT CHECK (protein_tag IS NULL OR length(protein_tag) BETWEEN 1 AND 64),
+          dietary_tags TEXT NOT NULL CHECK (
+            length(dietary_tags) <= 10000 AND json_valid(dietary_tags) AND json_type(dietary_tags) = 'array'
+          ),
+          suitability_tags TEXT NOT NULL CHECK (
+            length(suitability_tags) <= 10000 AND json_valid(suitability_tags)
+              AND json_type(suitability_tags) = 'array'
+          ),
+          extra_meal_servings REAL NOT NULL CHECK (extra_meal_servings BETWEEN 0 AND 1000000),
+          preference TEXT NOT NULL CHECK (preference IN ('favorite', 'neutral', 'disliked')),
+          needs_review INTEGER NOT NULL CHECK (needs_review IN (0, 1)),
+          parser_version TEXT NOT NULL CHECK (length(trim(parser_version)) BETWEEN 1 AND 100),
+          fetched_at TEXT NOT NULL CHECK (length(fetched_at) BETWEEN 1 AND 50),
+          raw_source_payload TEXT NOT NULL CHECK (
+            length(raw_source_payload) <= 1000000 AND json_valid(raw_source_payload)
+          ),
+          source_evidence TEXT NOT NULL CHECK (
+            length(source_evidence) <= 250000 AND json_valid(source_evidence)
+          )
+        ) STRICT;
+
+        CREATE UNIQUE INDEX recipes_canonical_identity
+          ON recipes(normalized_canonical_url);
+        CREATE UNIQUE INDEX recipes_source_title_identity
+          ON recipes(source_id, normalized_title);
+        CREATE INDEX recipes_source_id ON recipes(source_id);
+        CREATE INDEX recipes_normalized_title ON recipes(normalized_title);
+
+        CREATE TABLE recipe_ingredients (
+          recipe_id TEXT NOT NULL REFERENCES recipes(id) ON DELETE CASCADE ON UPDATE RESTRICT,
+          ordinal INTEGER NOT NULL CHECK (ordinal BETWEEN 0 AND 499),
+          raw_text TEXT NOT NULL CHECK (length(trim(raw_text)) BETWEEN 1 AND 2000),
+          normalized_name TEXT CHECK (
+            normalized_name IS NULL OR length(normalized_name) BETWEEN 1 AND 300
+          ),
+          quantity REAL CHECK (quantity IS NULL OR quantity > 0 AND quantity <= 1000000000),
+          unit TEXT CHECK (unit IS NULL OR length(trim(unit)) BETWEEN 1 AND 100),
+          uncertain INTEGER NOT NULL CHECK (uncertain IN (0, 1)),
+          PRIMARY KEY (recipe_id, ordinal)
+        ) STRICT;
+
+        CREATE INDEX recipe_ingredients_normalized_name
+          ON recipe_ingredients(normalized_name) WHERE normalized_name IS NOT NULL;
+
+        CREATE TABLE recipe_instructions (
+          recipe_id TEXT NOT NULL REFERENCES recipes(id) ON DELETE CASCADE ON UPDATE RESTRICT,
+          ordinal INTEGER NOT NULL CHECK (ordinal BETWEEN 0 AND 499),
+          text TEXT NOT NULL CHECK (length(trim(text)) BETWEEN 1 AND 5000),
+          PRIMARY KEY (recipe_id, ordinal)
+        ) STRICT;
+      `);
+    },
+  },
 ];
 
 function validateMigrations(pendingMigrations: readonly Migration[]): void {

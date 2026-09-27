@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { applySetup, createSetupConfiguration } from "../../src/commands/setup";
 import { createConfigurationRepositories } from "../../src/infrastructure/configuration-repositories";
 import { openDatabase } from "../../src/infrastructure/database";
+import { createRecipeRepository, type RecipeImport } from "../../src/infrastructure/recipe-repository";
 
 const temporaryDirectories: string[] = [];
 
@@ -12,6 +13,51 @@ async function temporaryDatabasePath(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "meal-planer-setup-"));
   temporaryDirectories.push(directory);
   return join(directory, "mealplan.sqlite");
+}
+
+function recipeImport(sourceId: string, canonicalUrl: string, title: string): RecipeImport {
+  return {
+    sourceId,
+    sourceUrl: canonicalUrl,
+    canonicalUrl,
+    title,
+    author: null,
+    servings: null,
+    prepMinutes: null,
+    cookMinutes: null,
+    totalMinutes: null,
+    cuisineTags: [],
+    proteinTag: null,
+    dietaryTags: [],
+    suitabilityTags: [],
+    extraMealServings: 0,
+    preference: "neutral",
+    needsReview: false,
+    parserVersion: "setup-test@1",
+    fetchedAt: "2026-09-27T10:15:00.000Z",
+    rawSourcePayload: {},
+    sourceEvidence: {},
+    ingredients: [],
+    instructions: [],
+  };
+}
+
+function snapshotSetupAndRecipeState(database: ReturnType<typeof openDatabase>): Record<string, unknown[]> {
+  const tables = [
+    "household_members",
+    "household_rules",
+    "day_profiles",
+    "preferred_stores",
+    "recipe_sources",
+    "pantry_items",
+    "recipes",
+    "recipe_ingredients",
+    "recipe_instructions",
+  ] as const;
+  return Object.fromEntries(tables.map((table) => [
+    table,
+    database.query(`SELECT * FROM ${table} ORDER BY rowid`).all(),
+  ]));
 }
 
 afterEach(async () => {
@@ -91,6 +137,127 @@ describe("setup workflow", () => {
     expect(repositories.preferredStores.list()).toEqual(replacement.preferredStores);
     expect(repositories.recipeSources.list()).toEqual(replacement.recipeSources);
     expect(repositories.pantryItems.list()).toEqual([pantryItem]);
+    database.close();
+  });
+
+  test("reconciles recipe sources without deleting imported recipe provenance", async () => {
+    const database = openDatabase(await temporaryDatabasePath());
+    const initial = createSetupConfiguration({
+      members: [{ id: "alex", name: "Alex", kind: "adult", servings: 1 }],
+    });
+    applySetup(database, initial);
+    const repositories = createConfigurationRepositories(database);
+    const desiredSource = initial.recipeSources[0]!;
+    repositories.recipeSources.upsert({
+      ...desiredSource,
+      name: "Locally changed",
+      enabled: false,
+    });
+    repositories.recipeSources.upsert({
+      id: "legacy-referenced",
+      name: "Legacy Referenced",
+      baseUrl: "https://legacy-referenced.example/",
+      adapter: "jsonld",
+      enabled: true,
+    });
+    repositories.recipeSources.upsert({
+      id: "legacy-unreferenced",
+      name: "Legacy Unreferenced",
+      baseUrl: "https://legacy-unreferenced.example/",
+      adapter: "jsonld",
+      enabled: true,
+    });
+    const recipes = createRecipeRepository(database);
+    const builtInRecipe = recipes.import(recipeImport(
+      desiredSource.id,
+      "https://built-in.example/recipe",
+      "Built-in recipe",
+    ));
+    const legacyRecipe = recipes.import(recipeImport(
+      "legacy-referenced",
+      "https://legacy-referenced.example/recipe",
+      "Legacy recipe",
+    ));
+    const replacement = createSetupConfiguration({
+      members: [{ id: "sam", name: "Sam", kind: "child", servings: 0.75 }],
+    });
+
+    applySetup(database, replacement);
+
+    expect(recipes.get(builtInRecipe.id)).toEqual(builtInRecipe);
+    expect(recipes.get(legacyRecipe.id)).toEqual(legacyRecipe);
+    expect(repositories.recipeSources.get(desiredSource.id)).toEqual(
+      replacement.recipeSources.find(({ id }) => id === desiredSource.id)!,
+    );
+    expect(repositories.recipeSources.get("legacy-referenced")).toEqual({
+      id: "legacy-referenced",
+      name: "Legacy Referenced",
+      baseUrl: "https://legacy-referenced.example/",
+      adapter: "jsonld",
+      enabled: false,
+    });
+    expect(repositories.recipeSources.get("legacy-unreferenced")).toBeNull();
+    expect(repositories.householdMembers.list()).toEqual(replacement.members);
+    database.close();
+  });
+
+  test("rerun replaces an unreferenced custom source that uses a built-in base URL", async () => {
+    const database = openDatabase(await temporaryDatabasePath());
+    const configuration = createSetupConfiguration({
+      members: [{ id: "alex", name: "Alex", kind: "adult", servings: 1 }],
+    });
+    applySetup(database, configuration);
+    const repositories = createConfigurationRepositories(database);
+    expect(repositories.recipeSources.remove("mummum")).toBe(true);
+    repositories.recipeSources.upsert({
+      id: "custom-mummum",
+      name: "Custom Mummum",
+      baseUrl: "https://mummum.dk/",
+      adapter: "auto",
+      enabled: false,
+    });
+
+    applySetup(database, configuration);
+
+    expect(repositories.recipeSources.list()).toEqual(configuration.recipeSources);
+    expect(repositories.recipeSources.get("custom-mummum")).toBeNull();
+    database.close();
+  });
+
+  test("rejects rebinding a referenced source id and rolls back all setup-managed state", async () => {
+    const database = openDatabase(await temporaryDatabasePath());
+    const initial = createSetupConfiguration({
+      members: [{ id: "alex", name: "Alex", kind: "adult", servings: 1 }],
+      rules: [{ memberId: null, kind: "dietary_restriction", value: "Gluten" }],
+      pantryItems: [{ name: "Rice", quantity: "500 g" }],
+    });
+    applySetup(database, initial);
+    const repositories = createConfigurationRepositories(database);
+    expect(repositories.recipeSources.remove("mummum")).toBe(true);
+    repositories.recipeSources.upsert({
+      id: "mummum",
+      name: "Unrelated recipes",
+      baseUrl: "https://unrelated.example/",
+      adapter: "auto",
+      enabled: false,
+    });
+    createRecipeRepository(database).import(recipeImport(
+      "mummum",
+      "https://unrelated.example/recipe",
+      "Unrelated recipe",
+    ));
+    const stateBeforeConflict = snapshotSetupAndRecipeState(database);
+    const replacement = createSetupConfiguration({
+      members: [{ id: "sam", name: "Sam", kind: "child", servings: 0.75 }],
+      rules: [{ memberId: "sam", kind: "disliked_ingredient", value: "Olives" }],
+      preferredStoreNames: ["Netto"],
+      pantryItems: [{ name: "Beans", quantity: "2 cans" }],
+    });
+
+    expect(() => applySetup(database, replacement)).toThrow(
+      "Cannot change base URL for referenced recipe source mummum from https://unrelated.example/ to https://mummum.dk/",
+    );
+    expect(snapshotSetupAndRecipeState(database)).toEqual(stateBeforeConflict);
     database.close();
   });
 
