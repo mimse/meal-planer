@@ -1,0 +1,1 @@
+export const MAX_HOUSEHOLD_MEMBERS = 50;

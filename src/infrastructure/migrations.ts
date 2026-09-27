@@ -91,6 +91,36 @@ function validateMigrations(pendingMigrations: readonly Migration[]): void {
   }
 }
 
+export function readValidatedMigrationLedger(
+  database: Database,
+  pendingMigrations: readonly Migration[] = migrations,
+): readonly { readonly version: number; readonly name: string }[] {
+  validateMigrations(pendingMigrations);
+  const appliedRows = database
+    .query<{ version: number; name: string }, []>(
+      "SELECT version, name FROM schema_migrations ORDER BY version",
+    )
+    .all();
+
+  for (const [index, appliedMigration] of appliedRows.entries()) {
+    const expectedMigration = pendingMigrations[index];
+    if (expectedMigration === undefined) {
+      throw new Error(
+        `Applied migration ${appliedMigration.version} (${appliedMigration.name}) is not in the known migration history`,
+      );
+    }
+    if (
+      appliedMigration.version !== expectedMigration.version
+      || appliedMigration.name !== expectedMigration.name
+    ) {
+      throw new Error(
+        `Migration ledger is not a known ordered prefix: expected ${expectedMigration.version} (${expectedMigration.name}), found ${appliedMigration.version} (${appliedMigration.name})`,
+      );
+    }
+  }
+  return appliedRows;
+}
+
 export function runMigrations(
   database: Database,
   pendingMigrations: readonly Migration[] = migrations,
@@ -107,28 +137,7 @@ export function runMigrations(
   let migrationFailure: { readonly error: unknown } | undefined;
 
   database.transaction(() => {
-    const appliedRows = database
-      .query<{ version: number; name: string }, []>(
-        "SELECT version, name FROM schema_migrations ORDER BY version",
-      )
-      .all();
-
-    for (const [index, appliedMigration] of appliedRows.entries()) {
-      const expectedMigration = pendingMigrations[index];
-      if (expectedMigration === undefined) {
-        throw new Error(
-          `Applied migration ${appliedMigration.version} (${appliedMigration.name}) is not in the known migration history`,
-        );
-      }
-      if (
-        appliedMigration.version !== expectedMigration.version
-        || appliedMigration.name !== expectedMigration.name
-      ) {
-        throw new Error(
-          `Migration ledger is not a known ordered prefix: expected ${expectedMigration.version} (${expectedMigration.name}), found ${appliedMigration.version} (${appliedMigration.name})`,
-        );
-      }
-    }
+    const appliedRows = readValidatedMigrationLedger(database, pendingMigrations);
 
     for (const migration of pendingMigrations.slice(appliedRows.length)) {
       try {

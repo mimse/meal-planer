@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { createConfigurationRepositories } from "../../src/infrastructure/configuration-repositories";
-import { openDatabase } from "../../src/infrastructure/database";
+import { openDatabase, openExistingDatabase } from "../../src/infrastructure/database";
 import { migrations, runMigrations, type Migration } from "../../src/infrastructure/migrations";
 
 const temporaryDirectories: string[] = [];
@@ -43,6 +43,17 @@ describe("openDatabase", () => {
     ]);
 
     database.close();
+  });
+
+  test("rejects an application-shaped database with an empty migration ledger before migration", async () => {
+    const path = await temporaryDatabasePath();
+    const database = openDatabase(path);
+    database.exec("DELETE FROM schema_migrations");
+    database.close();
+    const before = await readFile(path);
+
+    expect(() => openExistingDatabase(path)).toThrow("Application database migration ledger is empty");
+    expect(await readFile(path)).toEqual(before);
   });
 
   test("upserts, lists, and removes household members", async () => {

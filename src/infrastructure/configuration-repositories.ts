@@ -37,7 +37,7 @@ const householdRuleRowSchema = z.object({
 const householdRuleOutputSchema = householdRuleInputSchema.extend({
   id: z.string().min(1),
 }).superRefine((rule, context) => {
-  const expectedId = createHouseholdRuleId(rule, normalizeKey(rule.value));
+  const expectedId = createHouseholdRuleId(rule);
   if (rule.id !== expectedId) {
     context.addIssue({
       code: "custom",
@@ -150,7 +150,8 @@ function normalizeKey(value: string): string {
   return value.normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase("da-DK");
 }
 
-function createHouseholdRuleId(rule: HouseholdRuleInput, normalizedValue: string): string {
+export function createHouseholdRuleId(rule: HouseholdRuleInput): string {
+  const normalizedValue = normalizeKey(rule.value);
   const scope = rule.memberId === null ? "household" : `member:${rule.memberId}`;
   return `rule:${scope}:${rule.kind}:${encodeURIComponent(normalizedValue)}`;
 }
@@ -214,7 +215,7 @@ class HouseholdRuleRepository {
   upsert(input: HouseholdRuleInput): HouseholdRule {
     const rule = householdRuleInputSchema.parse(input);
     const normalizedValue = normalizeKey(rule.value);
-    const id = createHouseholdRuleId(rule, normalizedValue);
+    const id = createHouseholdRuleId(rule);
     this.database.query(`
       INSERT INTO household_rules (id, member_id, kind, value, normalized_value, created_at)
       VALUES (?, ?, ?, ?, ?, ?)
