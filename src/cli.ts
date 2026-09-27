@@ -8,8 +8,18 @@ import { TilbudstroldenClient } from "./adapters/deals/tilbudstrolden-client";
 import { readFamilyConfiguration, type FamilyEdit } from "./commands/family";
 import { runFamilyEditWorkflow } from "./commands/family-workflow";
 import { inspectRecipeUrl } from "./commands/inspect-recipe";
+import { runPantryAddWorkflow, runPantryRemoveWorkflow } from "./commands/pantry-workflow";
+import { readPantry } from "./commands/pantry";
 import { runSetupWorkflow } from "./commands/setup-workflow";
 import type { SetupAnswers } from "./commands/setup";
+import {
+  addRecipeSource,
+  createRecipeSource,
+  readRecipeSources,
+  removeRecipeSource,
+  setRecipeSourceEnabled,
+  validateRecipeSourceId,
+} from "./commands/sources";
 import { openExistingDatabase } from "./infrastructure/database";
 import { resolveDatabasePath } from "./infrastructure/database-path";
 import { ClackPromptAdapter } from "./presentation/prompts";
@@ -41,11 +51,12 @@ const prompts = new ClackPromptAdapter();
 
 const setup = program
   .command("setup")
-  .description("Configure household members, rules, weekly defaults, stores, and sources")
+  .description("Configure household members, rules, pantry, weekly defaults, stores, and sources")
   .option("--member <json>", "member object; repeat for each member", collect, [])
   .option("--household-dietary-restriction <text>", "household dietary restriction; repeatable", collect, [])
   .option("--household-disliked-ingredient <text>", "household disliked ingredient; repeatable", collect, [])
   .option("--member-rule <json>", "member-scoped rule object; repeatable", collect, [])
+  .option("--pantry-item <json>", "initial pantry item object; repeatable", collect, [])
   .option("--store <name>", "preferred store name; repeatable", collect, []);
 
 setup.action(async (options: {
@@ -53,12 +64,14 @@ setup.action(async (options: {
   householdDietaryRestriction: string[];
   householdDislikedIngredient: string[];
   memberRule: string[];
+  pantryItem: string[];
   store: string[];
 }) => {
   const hasFlags = options.member.length > 0
     || options.householdDietaryRestriction.length > 0
     || options.householdDislikedIngredient.length > 0
     || options.memberRule.length > 0
+    || options.pantryItem.length > 0
     || options.store.length > 0;
   if (hasFlags && options.member.length === 0) {
     throw new Error("Flag-based setup requires at least one --member");
@@ -70,6 +83,7 @@ setup.action(async (options: {
       ...options.householdDislikedIngredient.map((value) => ({ memberId: null, kind: "disliked_ingredient" as const, value })),
       ...options.memberRule.map((value) => parseJson(value, "--member-rule") as NonNullable<SetupAnswers["rules"]>[number]),
     ],
+    pantryItems: options.pantryItem.map((value) => parseJson(value, "--pantry-item") as NonNullable<SetupAnswers["pantryItems"]>[number]),
     ...(options.store.length === 0 ? {} : { preferredStoreNames: options.store }),
   } : undefined;
   const result = await runSetupWorkflow({
@@ -136,6 +150,123 @@ family.command("edit")
       ...(edit === undefined ? {} : { edit }),
     });
     if (result === "saved") console.log("Family configuration saved.");
+  });
+
+const pantry = program.command("pantry").description("Show or edit pantry items");
+
+pantry.command("show")
+  .description("Show pantry items")
+  .option("--json", "emit stable JSON")
+  .action((options: { json?: boolean }) => {
+    const database = openExistingDatabase(databasePath());
+    try {
+      const items = readPantry(database);
+      if (options.json) {
+        process.stdout.write(`${JSON.stringify(items, null, 2)}\n`);
+      } else {
+        console.log(`Pantry (${items.length})`);
+        for (const item of items) console.log(`- ${item.name}: ${item.quantity}`);
+      }
+    } finally {
+      database.close();
+    }
+  });
+
+pantry.command("add")
+  .description("Add or replace pantry items")
+  .option("--item <json>", "pantry item object; repeatable", collect, [])
+  .action(async (options: { item: string[] }) => {
+    const items = options.item.length === 0
+      ? undefined
+      : options.item.map((value) => parseJson(value, "--item"));
+    const result = await runPantryAddWorkflow({
+      databasePath: databasePath(),
+      prompts,
+      ...(items === undefined ? {} : { items }),
+    });
+    if (result === "saved") console.log("Pantry items saved.");
+  });
+
+pantry.command("remove")
+  .description("Remove pantry items")
+  .argument("[names...]", "pantry item names")
+  .action(async (names: string[]) => {
+    const result = await runPantryRemoveWorkflow({
+      databasePath: databasePath(),
+      prompts,
+      ...(names.length === 0 ? {} : { names }),
+    });
+    if (result === "saved") console.log("Pantry items removed.");
+  });
+
+const sources = program.command("sources").description("Configure recipe sources");
+
+sources.command("list")
+  .description("List configured recipe sources")
+  .option("--json", "emit stable JSON")
+  .action((options: { json?: boolean }) => {
+    const database = openExistingDatabase(databasePath());
+    try {
+      const configuredSources = readRecipeSources(database);
+      if (options.json) {
+        process.stdout.write(`${JSON.stringify(configuredSources, null, 2)}\n`);
+      } else {
+        console.log(`Recipe sources (${configuredSources.length})`);
+        for (const source of configuredSources) {
+          console.log(`- ${source.name} [${source.id}] · ${source.adapter} · ${source.enabled ? "enabled" : "disabled"} · ${source.baseUrl}`);
+        }
+      }
+    } finally {
+      database.close();
+    }
+  });
+
+sources.command("add")
+  .description("Add recipe-source configuration (probing and sync remain Phase 2)")
+  .argument("<base-url>", "HTTP(S) source base URL")
+  .option("--id <id>", "stable source id")
+  .option("--name <name>", "display name")
+  .option("--adapter <adapter>", "auto, jsonld, microdata, or spisbedre-inertia", "auto")
+  .action((baseUrl: string, options: { id?: string; name?: string; adapter: string }) => {
+    const source = createRecipeSource({ baseUrl, ...options });
+    const database = openExistingDatabase(databasePath());
+    try {
+      addRecipeSource(database, source);
+      console.log(`Recipe source added: ${source.id}. Probe and sync are not available until Phase 2.`);
+    } finally {
+      database.close();
+    }
+  });
+
+for (const enabled of [true, false] as const) {
+  const verb = enabled ? "enable" : "disable";
+  sources.command(verb)
+    .description(`${enabled ? "Enable" : "Disable"} a configured recipe source`)
+    .argument("<source-id>", "stable source id")
+    .action((sourceId: string) => {
+      const id = validateRecipeSourceId(sourceId);
+      const database = openExistingDatabase(databasePath());
+      try {
+        setRecipeSourceEnabled(database, id, enabled);
+        console.log(`Recipe source ${id} ${enabled ? "enabled" : "disabled"}.`);
+      } finally {
+        database.close();
+      }
+    });
+}
+
+sources.command("remove")
+  .description("Remove recipe-source configuration")
+  .argument("<source-id>", "stable source id")
+  .action((sourceId: string) => {
+    const id = validateRecipeSourceId(sourceId);
+    const database = openExistingDatabase(databasePath());
+    try {
+      removeRecipeSource(database, id);
+      console.log(`Recipe source removed: ${id}.`);
+    } finally {
+      database.close();
+    }
   });
 
 const recipes = program

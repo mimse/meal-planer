@@ -36,6 +36,196 @@ afterEach(async () => {
 });
 
 describe("setup and family CLI", () => {
+  test("adds pantry items and shows stable JSON across CLI processes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "meal-planer-cli-configuration-"));
+    temporaryDirectories.push(root);
+    const databasePath = join(root, "family.sqlite");
+    const setup = await runCli([
+      "--database", databasePath, "setup",
+      "--member", JSON.stringify({ id: "alex", name: "Alex", kind: "adult", servings: 1 }),
+    ]);
+    expect(setup.exitCode, setup.stderr).toBe(0);
+
+    const added = await runCli([
+      "--database", databasePath, "pantry", "add",
+      "--item", JSON.stringify({ name: " Rice ", quantity: "ca. 500 g" }),
+      "--item", JSON.stringify({ name: "Chickpeas", quantity: "2 cans" }),
+    ]);
+    expect(added.exitCode, added.stderr).toBe(0);
+
+    const shown = await runCli(["--database", databasePath, "pantry", "show", "--json"]);
+    expect(shown.exitCode, shown.stderr).toBe(0);
+    expect(shown.stdout).toBe(`${JSON.stringify([
+      { normalizedName: "chickpeas", name: "Chickpeas", quantity: "2 cans" },
+      { normalizedName: "rice", name: "Rice", quantity: "ca. 500 g" },
+    ], null, 2)}\n`);
+  });
+
+  test("pantry removal normalizes Unicode names and rolls back when any name is unknown", async () => {
+    const root = await mkdtemp(join(tmpdir(), "meal-planer-cli-configuration-"));
+    temporaryDirectories.push(root);
+    const databasePath = join(root, "family.sqlite");
+    expect((await runCli([
+      "--database", databasePath, "setup",
+      "--member", JSON.stringify({ id: "alex", name: "Alex", kind: "adult", servings: 1 }),
+    ])).exitCode).toBe(0);
+    expect((await runCli([
+      "--database", databasePath, "pantry", "add",
+      "--item", JSON.stringify({ name: "Café salt", quantity: "1 bag" }),
+      "--item", JSON.stringify({ name: "Rice", quantity: "500 g" }),
+    ])).exitCode).toBe(0);
+
+    const failed = await runCli([
+      "--database", databasePath, "pantry", "remove", "Ｃａｆé   salt", "missing",
+    ]);
+    expect(failed.exitCode).not.toBe(0);
+    expect(failed.stderr).toContain("Pantry item does not exist: missing");
+    expect(JSON.parse((await runCli([
+      "--database", databasePath, "pantry", "show", "--json",
+    ])).stdout)).toHaveLength(2);
+
+    const removed = await runCli([
+      "--database", databasePath, "pantry", "remove", " Ｃａｆé   salt ",
+    ]);
+    expect(removed.exitCode, removed.stderr).toBe(0);
+    expect(JSON.parse((await runCli([
+      "--database", databasePath, "pantry", "show", "--json",
+    ])).stdout)).toEqual([
+      { normalizedName: "rice", name: "Rice", quantity: "500 g" },
+    ]);
+  });
+
+  test("invalid multi-item pantry input is rejected before any mutation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "meal-planer-cli-configuration-"));
+    temporaryDirectories.push(root);
+    const databasePath = join(root, "family.sqlite");
+    expect((await runCli([
+      "--database", databasePath, "setup",
+      "--member", JSON.stringify({ id: "alex", name: "Alex", kind: "adult", servings: 1 }),
+    ])).exitCode).toBe(0);
+
+    const result = await runCli([
+      "--database", databasePath, "pantry", "add",
+      "--item", JSON.stringify({ name: "Must not persist", quantity: "1 bag" }),
+      "--item", JSON.stringify({ name: "Invalid", quantity: "   " }),
+    ]);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(JSON.parse((await runCli([
+      "--database", databasePath, "pantry", "show", "--json",
+    ])).stdout)).toEqual([]);
+  });
+
+  test("pantry show does not create a missing database or parent directory", async () => {
+    const root = await mkdtemp(join(tmpdir(), "meal-planer-cli-configuration-"));
+    temporaryDirectories.push(root);
+    const databasePath = join(root, "missing", "family.sqlite");
+
+    const result = await runCli(["--database", databasePath, "pantry", "show", "--json"]);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("Run mealplan setup first");
+    expect(await exists(join(root, "missing"))).toBe(false);
+  });
+
+  test("adds a validated recipe source and lists stable JSON across processes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "meal-planer-cli-configuration-"));
+    temporaryDirectories.push(root);
+    const databasePath = join(root, "family.sqlite");
+    expect((await runCli([
+      "--database", databasePath, "setup",
+      "--member", JSON.stringify({ id: "alex", name: "Alex", kind: "adult", servings: 1 }),
+    ])).exitCode).toBe(0);
+
+    const added = await runCli([
+      "--database", databasePath, "sources", "add", "https://recipes.example/path",
+      "--id", "example-recipes", "--name", "Example Recipes", "--adapter", "auto",
+    ]);
+    expect(added.exitCode, added.stderr).toBe(0);
+
+    const listed = await runCli(["--database", databasePath, "sources", "list", "--json"]);
+    expect(listed.exitCode, listed.stderr).toBe(0);
+    const sources = JSON.parse(listed.stdout);
+    expect(sources.find((source: { id: string }) => source.id === "example-recipes")).toEqual({
+      id: "example-recipes",
+      name: "Example Recipes",
+      baseUrl: "https://recipes.example/path",
+      adapter: "auto",
+      enabled: true,
+    });
+    expect(listed.stdout).toBe(`${JSON.stringify(sources, null, 2)}\n`);
+  });
+
+  test("disables, enables, and removes a recipe source persistently", async () => {
+    const root = await mkdtemp(join(tmpdir(), "meal-planer-cli-configuration-"));
+    temporaryDirectories.push(root);
+    const databasePath = join(root, "family.sqlite");
+    expect((await runCli([
+      "--database", databasePath, "setup",
+      "--member", JSON.stringify({ id: "alex", name: "Alex", kind: "adult", servings: 1 }),
+    ])).exitCode).toBe(0);
+
+    expect((await runCli(["--database", databasePath, "sources", "disable", "mummum"])).exitCode).toBe(0);
+    let listed = JSON.parse((await runCli([
+      "--database", databasePath, "sources", "list", "--json",
+    ])).stdout);
+    expect(listed.find((source: { id: string }) => source.id === "mummum").enabled).toBe(false);
+
+    expect((await runCli(["--database", databasePath, "sources", "enable", "mummum"])).exitCode).toBe(0);
+    listed = JSON.parse((await runCli([
+      "--database", databasePath, "sources", "list", "--json",
+    ])).stdout);
+    expect(listed.find((source: { id: string }) => source.id === "mummum").enabled).toBe(true);
+
+    expect((await runCli(["--database", databasePath, "sources", "remove", "mummum"])).exitCode).toBe(0);
+    listed = JSON.parse((await runCli([
+      "--database", databasePath, "sources", "list", "--json",
+    ])).stdout);
+    expect(listed.some((source: { id: string }) => source.id === "mummum")).toBe(false);
+  });
+
+  test("source validation and identity conflicts leave configuration unchanged", async () => {
+    const root = await mkdtemp(join(tmpdir(), "meal-planer-cli-configuration-"));
+    temporaryDirectories.push(root);
+    const databasePath = join(root, "family.sqlite");
+    expect((await runCli([
+      "--database", databasePath, "setup",
+      "--member", JSON.stringify({ id: "alex", name: "Alex", kind: "adult", servings: 1 }),
+    ])).exitCode).toBe(0);
+    expect((await runCli([
+      "--database", databasePath, "sources", "add", "https://recipes.example", "--id", "recipes",
+    ])).exitCode).toBe(0);
+    const before = (await runCli(["--database", databasePath, "sources", "list", "--json"])).stdout;
+
+    const duplicateUrl = await runCli([
+      "--database", databasePath, "sources", "add", "https://recipes.example/", "--id", "other",
+    ]);
+    expect(duplicateUrl.exitCode).not.toBe(0);
+    expect(duplicateUrl.stderr).toContain("Recipe source URL already exists as recipes");
+    expect((await runCli(["--database", databasePath, "sources", "list", "--json"])).stdout).toBe(before);
+
+    const unknown = await runCli(["--database", databasePath, "sources", "disable", "missing"]);
+    expect(unknown.exitCode).not.toBe(0);
+    expect(unknown.stderr).toContain("Recipe source does not exist: missing");
+    expect((await runCli(["--database", databasePath, "sources", "list", "--json"])).stdout).toBe(before);
+  });
+
+  test("source reads and invalid adds do not initialize a missing database", async () => {
+    const root = await mkdtemp(join(tmpdir(), "meal-planer-cli-configuration-"));
+    temporaryDirectories.push(root);
+    const databasePath = join(root, "missing", "family.sqlite");
+
+    const listed = await runCli(["--database", databasePath, "sources", "list", "--json"]);
+    expect(listed.exitCode).not.toBe(0);
+    expect(await exists(join(root, "missing"))).toBe(false);
+
+    const invalid = await runCli([
+      "--database", databasePath, "sources", "add", "file:///etc/passwd", "--adapter", "imaginary",
+    ]);
+    expect(invalid.exitCode).not.toBe(0);
+    expect(await exists(join(root, "missing"))).toBe(false);
+  });
+
   test("setup rejects 51 members before creating database state", async () => {
     const root = await mkdtemp(join(tmpdir(), "meal-planer-cli-configuration-"));
     temporaryDirectories.push(root);
@@ -98,6 +288,7 @@ describe("setup and family CLI", () => {
       "--member", JSON.stringify({ id: "sam", name: "Sam, Jr.", kind: "child", servings: 0.75 }),
       "--household-dietary-restriction", "No peanuts, tree nuts; sesame",
       "--household-disliked-ingredient", "Olives, capers; anchovies",
+      "--pantry-item", JSON.stringify({ name: "Rice", quantity: "500 g" }),
     ]);
     expect(setup.exitCode, setup.stderr).toBe(0);
     expect(await exists(databasePath)).toBe(true);
@@ -126,6 +317,10 @@ describe("setup and family CLI", () => {
     expect(human.stdout).toContain("Members (2)");
     expect(human.stdout).toContain("Sam, Jr. [sam] · child · 0.75 serving(s)");
     expect(human.stdout).toContain("Preferred stores: REMA 1000, Netto, SuperBrugsen");
+    const pantry = await runCli(["--database", databasePath, "pantry", "show", "--json"]);
+    expect(JSON.parse(pantry.stdout)).toEqual([
+      { normalizedName: "rice", name: "Rice", quantity: "500 g" },
+    ]);
   });
 
   test("edits members and household/member rules atomically across CLI processes", async () => {
@@ -270,6 +465,21 @@ describe("setup and family CLI", () => {
     const invalid = await runCli([
       "--database", databasePath, "setup",
       "--member", JSON.stringify({ id: "broken", name: "Broken", kind: "adult", servings: -1 }),
+    ]);
+
+    expect(invalid.exitCode).not.toBe(0);
+    expect(await exists(join(root, "must-not-exist"))).toBe(false);
+  });
+
+  test("setup validates normalized pantry names before creating database state", async () => {
+    const root = await mkdtemp(join(tmpdir(), "meal-planer-cli-configuration-"));
+    temporaryDirectories.push(root);
+    const databasePath = join(root, "must-not-exist", "family.sqlite");
+
+    const invalid = await runCli([
+      "--database", databasePath, "setup",
+      "--member", JSON.stringify({ id: "alex", name: "Alex", kind: "adult", servings: 1 }),
+      "--pantry-item", JSON.stringify({ name: "ﬃ".repeat(200), quantity: "1 bag" }),
     ]);
 
     expect(invalid.exitCode).not.toBe(0);

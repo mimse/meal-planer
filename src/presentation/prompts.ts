@@ -1,8 +1,14 @@
 import * as clack from "@clack/prompts";
 import type { FamilyConfiguration, FamilyEdit } from "../commands/family";
+import type { PantryPromptAdapter } from "../commands/pantry-workflow";
 import { DEFAULT_STORE_NAMES, type SetupAnswers } from "../commands/setup";
-import { MAX_HOUSEHOLD_MEMBERS } from "../domain/configuration";
-import type { HouseholdMember, HouseholdRuleInput } from "../infrastructure/configuration-repositories";
+import { MAX_HOUSEHOLD_MEMBERS, MAX_PANTRY_ITEMS_PER_OPERATION } from "../domain/configuration";
+import type {
+  HouseholdMember,
+  HouseholdRuleInput,
+  PantryItem,
+  PantryItemInput,
+} from "../infrastructure/configuration-repositories";
 import {
   getDraftMembers,
   getDraftRules,
@@ -79,7 +85,32 @@ async function collectRules(kind: HouseholdRuleInput["kind"]): Promise<Household
   }
 }
 
-export class ClackPromptAdapter implements PromptAdapter {
+export class ClackPromptAdapter implements PromptAdapter, PantryPromptAdapter {
+  async collectPantryItems(): Promise<readonly PantryItemInput[] | Cancelled> {
+    const items: PantryItemInput[] = [];
+    while (true) {
+      const name = await requiredText("Pantry item name");
+      if (name === CANCELLED) return CANCELLED;
+      const quantity = await requiredText("Pantry quantity");
+      if (quantity === CANCELLED) return CANCELLED;
+      items.push({ name, quantity });
+      if (items.length === MAX_PANTRY_ITEMS_PER_OPERATION) return items;
+      const addAnother = await clack.confirm({ message: "Add another pantry item?", initialValue: false });
+      if (cancelled(addAnother)) return CANCELLED;
+      if (!addAnother) return items;
+    }
+  }
+
+  async collectPantryNames(current: readonly PantryItem[]): Promise<readonly string[] | Cancelled> {
+    if (current.length === 0) throw new Error("Pantry is empty");
+    const names = await clack.multiselect({
+      message: "Pantry items to remove",
+      options: current.map((item) => ({ value: item.name, label: `${item.name}: ${item.quantity}` })),
+      required: true,
+    });
+    return cancelled(names) ? CANCELLED : names;
+  }
+
   async collectSetup(): Promise<SetupAnswers | Cancelled> {
     clack.intro("Mealplan setup");
     const countValue = await clack.text({
@@ -119,6 +150,14 @@ export class ClackPromptAdapter implements PromptAdapter {
     if (restrictions === CANCELLED) return CANCELLED;
     const dislikes = await collectRules("disliked_ingredient");
     if (dislikes === CANCELLED) return CANCELLED;
+    const addPantry = await clack.confirm({ message: "Add pantry staples?", initialValue: false });
+    if (cancelled(addPantry)) return CANCELLED;
+    let pantryItems: readonly PantryItemInput[] = [];
+    if (addPantry) {
+      const collectedPantryItems = await this.collectPantryItems();
+      if (collectedPantryItems === CANCELLED) return CANCELLED;
+      pantryItems = collectedPantryItems;
+    }
     const stores = await clack.multiselect({
       message: "Preferred stores",
       options: DEFAULT_STORE_NAMES.map((name) => ({ value: name, label: name })),
@@ -127,7 +166,12 @@ export class ClackPromptAdapter implements PromptAdapter {
     });
     if (cancelled(stores)) return CANCELLED;
 
-    return { members, rules: [...restrictions, ...dislikes], preferredStoreNames: stores };
+    return {
+      members,
+      rules: [...restrictions, ...dislikes],
+      pantryItems,
+      preferredStoreNames: stores,
+    };
   }
 
   async collectFamilyEdit(current: FamilyConfiguration): Promise<FamilyEdit | Cancelled> {

@@ -328,7 +328,7 @@ describe("openDatabase", () => {
       id: "mummum",
       name: "Mummum",
       baseUrl: "https://mummum.dk/",
-      adapter: "jsonld",
+      adapter: "jsonld" as const,
       enabled: true,
     };
 
@@ -520,6 +520,20 @@ describe("openDatabase", () => {
       adapter: "auto",
       enabled: true,
     })).toThrow("Recipe source URL must use HTTP or HTTPS");
+    expect(() => repositories.recipeSources.upsert({
+      id: "unsupported",
+      name: "Unsupported",
+      baseUrl: "https://example.com/",
+      adapter: "imaginary" as "auto",
+      enabled: true,
+    })).toThrow();
+    expect(() => repositories.recipeSources.upsert({
+      id: "oversized-url",
+      name: "Oversized URL",
+      baseUrl: `https://example.com/${"x".repeat(2_048)}`,
+      adapter: "auto",
+      enabled: true,
+    })).toThrow();
     expect(() => repositories.pantryItems.upsert({ name: "Rice", quantity: "   " })).toThrow(
       "Pantry quantity cannot be empty",
     );

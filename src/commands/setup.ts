@@ -1,12 +1,17 @@
 import type { Database } from "bun:sqlite";
 import { z } from "zod";
 import { BUILT_IN_RECIPE_SOURCES } from "../adapters/recipes/sources";
-import { MAX_HOUSEHOLD_MEMBERS } from "../domain/configuration";
+import {
+  MAX_HOUSEHOLD_MEMBERS,
+  MAX_PANTRY_ITEMS_PER_OPERATION,
+  RECIPE_SOURCE_ADAPTERS,
+} from "../domain/configuration";
 import {
   createConfigurationRepositories,
   type DayProfile,
   type HouseholdMember,
   type HouseholdRuleInput,
+  type PantryItemInput,
   type PreferredStore,
   type RecipeSource,
 } from "../infrastructure/configuration-repositories";
@@ -43,9 +48,19 @@ const preferredStoreSchema = z.object({
 const recipeSourceSchema = z.object({
   id: identifierSchema,
   name: z.string().trim().min(1).max(200),
-  baseUrl: z.string().url(),
-  adapter: z.string().trim().min(1).max(100),
+  baseUrl: z.string().max(2_048).url(),
+  adapter: z.enum(RECIPE_SOURCE_ADAPTERS),
   enabled: z.boolean(),
+}).strict();
+const pantryItemSchema = z.object({
+  name: z.string().trim().min(1).max(200).refine(
+    (name) => name.normalize("NFKC").trim().replace(/\s+/g, " ").length <= 200,
+    "Normalized pantry name is too long",
+  ),
+  quantity: z.string().max(500).refine(
+    (quantity) => quantity.trim().length > 0,
+    "Pantry quantity cannot be empty",
+  ),
 }).strict();
 
 const setupConfigurationSchema = z.object({
@@ -54,6 +69,7 @@ const setupConfigurationSchema = z.object({
   dayProfiles: z.array(dayProfileSchema).length(7),
   preferredStores: z.array(preferredStoreSchema).min(1),
   recipeSources: z.array(recipeSourceSchema),
+  pantryItems: z.array(pantryItemSchema).max(MAX_PANTRY_ITEMS_PER_OPERATION),
 }).strict().superRefine((configuration, context) => {
   const memberIds = new Set<string>();
   for (const [index, member] of configuration.members.entries()) {
@@ -84,6 +100,7 @@ export type SetupAnswers = {
   readonly members: readonly HouseholdMember[];
   readonly rules?: readonly HouseholdRuleInput[];
   readonly preferredStoreNames?: readonly string[];
+  readonly pantryItems?: readonly PantryItemInput[];
 };
 
 export const DEFAULT_DAY_PROFILES: readonly DayProfile[] = [
@@ -127,6 +144,7 @@ export function createSetupConfiguration(answers: SetupAnswers): SetupConfigurat
     dayProfiles: DEFAULT_DAY_PROFILES,
     preferredStores: stores,
     recipeSources: sources,
+    pantryItems: answers.pantryItems ?? [],
   });
 }
 
@@ -151,5 +169,6 @@ export function applySetup(database: Database, input: SetupConfiguration): void 
     for (const profile of configuration.dayProfiles) repositories.dayProfiles.upsert(profile);
     for (const store of configuration.preferredStores) repositories.preferredStores.upsert(store);
     for (const source of configuration.recipeSources) repositories.recipeSources.upsert(source);
+    for (const item of configuration.pantryItems) repositories.pantryItems.upsert(item);
   }).immediate();
 }

@@ -4,9 +4,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runFamilyEditWorkflow } from "../../src/commands/family-workflow";
+import { runPantryAddWorkflow, runPantryRemoveWorkflow } from "../../src/commands/pantry-workflow";
 import { readFamilyConfiguration } from "../../src/commands/family";
 import { applySetup, createSetupConfiguration } from "../../src/commands/setup";
 import { runSetupWorkflow } from "../../src/commands/setup-workflow";
+import { createConfigurationRepositories } from "../../src/infrastructure/configuration-repositories";
 import { openDatabase } from "../../src/infrastructure/database";
 import { CANCELLED, type PromptAdapter } from "../../src/presentation/prompts";
 
@@ -38,6 +40,7 @@ describe("interactive command workflows", () => {
       collectSetup: async () => ({
         members: [{ id: "pat", name: "Pat", kind: "adult", servings: 1.5 }],
         rules: [{ memberId: null, kind: "dietary_restriction", value: "No peanuts" }],
+        pantryItems: [{ name: "Rice", quantity: "500 g" }],
       }),
       collectFamilyEdit: async () => CANCELLED,
     };
@@ -46,6 +49,9 @@ describe("interactive command workflows", () => {
     const database = openDatabase(databasePath);
     expect(readFamilyConfiguration(database).members).toEqual([
       { id: "pat", name: "Pat", kind: "adult", servings: 1.5 },
+    ]);
+    expect(createConfigurationRepositories(database).pantryItems.list()).toEqual([
+      { normalizedName: "rice", name: "Rice", quantity: "500 g" },
     ]);
     database.close();
   });
@@ -134,5 +140,29 @@ describe("interactive command workflows", () => {
     expect(family.members[0]?.name).toBe("Alexandra");
     expect(family.rules[0]).toMatchObject({ memberId: "alex", value: "Fennel, raw" });
     reopened.close();
+  });
+
+  test("pantry workflows use injected interactive answers for add and remove", async () => {
+    const root = await mkdtemp(join(tmpdir(), "meal-planer-prompt-"));
+    temporaryDirectories.push(root);
+    const databasePath = join(root, "mealplan.sqlite");
+    const database = openDatabase(databasePath);
+    applySetup(database, createSetupConfiguration({
+      members: [{ id: "alex", name: "Alex", kind: "adult", servings: 1 }],
+    }));
+    database.close();
+    const prompts = {
+      collectPantryItems: async () => [{ name: "Rice", quantity: "500 g" }],
+      collectPantryNames: async () => [" rice "],
+    };
+
+    expect(await runPantryAddWorkflow({ databasePath, prompts })).toBe("saved");
+    const afterAdd = openDatabase(databasePath);
+    expect(createConfigurationRepositories(afterAdd).pantryItems.list()).toHaveLength(1);
+    afterAdd.close();
+    expect(await runPantryRemoveWorkflow({ databasePath, prompts })).toBe("saved");
+    const afterRemove = openDatabase(databasePath);
+    expect(createConfigurationRepositories(afterRemove).pantryItems.list()).toEqual([]);
+    afterRemove.close();
   });
 });

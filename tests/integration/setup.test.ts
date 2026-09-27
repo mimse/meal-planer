@@ -93,4 +93,26 @@ describe("setup workflow", () => {
     expect(repositories.pantryItems.list()).toEqual([pantryItem]);
     database.close();
   });
+
+  test("setup atomically upserts supplied pantry items without deleting other pantry entries", async () => {
+    const database = openDatabase(await temporaryDatabasePath());
+    applySetup(database, createSetupConfiguration({
+      members: [{ id: "alex", name: "Alex", kind: "adult", servings: 1 }],
+      pantryItems: [
+        { name: "Rice", quantity: "500 g" },
+        { name: "Beans", quantity: "2 cans" },
+      ],
+    }));
+
+    applySetup(database, createSetupConfiguration({
+      members: [{ id: "alex", name: "Alex", kind: "adult", servings: 1 }],
+      pantryItems: [{ name: " ＲＩＣＥ ", quantity: "1 kg" }],
+    }));
+
+    expect(createConfigurationRepositories(database).pantryItems.list()).toEqual([
+      { normalizedName: "beans", name: "Beans", quantity: "2 cans" },
+      { normalizedName: "rice", name: "ＲＩＣＥ", quantity: "1 kg" },
+    ]);
+    database.close();
+  });
 });

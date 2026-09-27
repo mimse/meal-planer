@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { z } from "zod";
+import { RECIPE_SOURCE_ADAPTERS } from "../domain/configuration";
 
 const identifierSchema = z.string().trim().min(1).max(100).regex(/^[a-z0-9][a-z0-9_-]*$/i);
 const householdMemberInputSchema = z.object({
@@ -66,11 +67,11 @@ const dayProfileOutputSchema = dayProfileSchema;
 const recipeSourceSchema = z.object({
   id: identifierSchema,
   name: z.string().trim().min(1).max(200),
-  baseUrl: z.string().url().refine((value) => {
+  baseUrl: z.string().max(2_048).url().refine((value) => {
     const protocol = new URL(value).protocol;
     return protocol === "http:" || protocol === "https:";
   }, "Recipe source URL must use HTTP or HTTPS"),
-  adapter: z.string().trim().min(1).max(100),
+  adapter: z.enum(RECIPE_SOURCE_ADAPTERS),
   enabled: z.boolean(),
 }).strict();
 
