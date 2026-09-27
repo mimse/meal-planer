@@ -1,0 +1,28 @@
+{
+  "name": "meal-planer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "mealplan": "./src/cli.ts"
+  },
+  "scripts": {
+    "start": "bun run src/cli.ts",
+    "vendor:install": "npm ci --prefix vendor/tilbudstrolden-mcp && npm run build --prefix vendor/tilbudstrolden-mcp",
+    "vendor:test": "npm test --prefix vendor/tilbudstrolden-mcp",
+    "test": "bun test tests",
+    "typecheck": "bunx tsc --noEmit",
+    "build": "bun build src/cli.ts --outdir dist --target bun",
+    "verify": "bun run test && bun run typecheck && bun run build"
+  },
+  "devDependencies": {
+    "bun-types": "^1.4.2",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "cheerio": "^1.2.0",
+    "commander": "^15.0.0",
+    "zod": "^4.6.5"
+  }
+}

@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: vendor/tilbudstrolden-mcp/package-lock.json
+      - run: bun install --frozen-lockfile
+      - run: npm ci --prefix vendor/tilbudstrolden-mcp
+      - run: npm run build --prefix vendor/tilbudstrolden-mcp
+      - run: npm test --prefix vendor/tilbudstrolden-mcp
+      - run: bun run test
+      - run: bun run typecheck
+      - run: bun run build

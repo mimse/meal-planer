@@ -1,0 +1,3 @@
+[submodule "vendor/tilbudstrolden-mcp"]
+	path = vendor/tilbudstrolden-mcp
+	url = https://github.com/olgasafonova/tilbudstrolden-mcp.git
