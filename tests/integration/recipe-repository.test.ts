@@ -319,6 +319,64 @@ describe("recipe persistence", () => {
     database.close();
   });
 
+  test("matches a normalized source URL when canonical URL and title both change", async () => {
+    const database = openDatabase(await temporaryDatabasePath());
+    addSource(database);
+    const recipes = createRecipeRepository(database);
+    const first = recipes.import(recipeImport({
+      title: "Old title",
+      sourceUrl: "https://example.dk/recipes/caf%C3%A9",
+    }));
+
+    const refreshed = recipes.import(recipeImport({
+      title: "New title",
+      canonicalUrl: "https://example.dk/recipes/new-canonical",
+      sourceUrl: "https://example.dk/recipes/caf%c3%a9",
+    }));
+
+    expect(refreshed.id).toBe(first.id);
+    expect(recipes.list()).toEqual([refreshed]);
+    database.close();
+  });
+
+  test("does not use a source URL to merge recipes across source IDs", async () => {
+    const database = openDatabase(await temporaryDatabasePath());
+    addSource(database);
+    addSource(database, "other");
+    const recipes = createRecipeRepository(database);
+    const first = recipes.import(recipeImport({ sourceUrl: "https://shared.example/recipe" }));
+    const second = recipes.import(recipeImport({
+      sourceId: "other",
+      title: "Other recipe",
+      canonicalUrl: "https://other.dk/other-recipe",
+      sourceUrl: "https://shared.example/recipe",
+    }));
+
+    expect(second.id).not.toBe(first.id);
+    expect(recipes.list()).toHaveLength(2);
+    database.close();
+  });
+
+  test("rejects source URL identity when canonical and title identify another recipe", async () => {
+    const database = openDatabase(await temporaryDatabasePath());
+    addSource(database);
+    const recipes = createRecipeRepository(database);
+    const first = recipes.import(recipeImport({ title: "First", sourceUrl: "https://example.dk/source/first" }));
+    const second = recipes.import(recipeImport({
+      title: "Second",
+      canonicalUrl: "https://example.dk/recipes/second",
+      sourceUrl: "https://example.dk/source/second",
+    }));
+
+    expect(() => recipes.import(recipeImport({
+      title: second.title,
+      canonicalUrl: second.canonicalUrl,
+      sourceUrl: first.sourceUrl,
+    }))).toThrow("source URL");
+    expect(recipes.list()).toHaveLength(2);
+    database.close();
+  });
+
   test("rejects ambiguous canonical and source-title matches instead of merging recipes", async () => {
     const database = openDatabase(await temporaryDatabasePath());
     addSource(database);
@@ -436,6 +494,7 @@ describe("recipe persistence", () => {
     const alpha = recipes.import(recipeImport({
       title: "Alpha Suppe",
       canonicalUrl: "https://example.dk/alpha",
+      sourceUrl: "https://example.dk/alpha",
       dietaryTags: ["vegan"],
       suitabilityTags: ["batchCook"],
       cuisineTags: ["Nordic"],

@@ -73,6 +73,7 @@ export async function runSourceTest(
     id: source.id,
     baseUrl: source.baseUrl,
     discoveryUrl: builtIn?.discoveryUrl ?? null,
+    recipeScope: builtIn === undefined ? "path" : "site",
   }, discoveryFetcher, dependencies.discoveryLimits);
 
   return {

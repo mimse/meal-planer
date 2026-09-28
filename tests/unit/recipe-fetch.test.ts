@@ -67,6 +67,27 @@ describe("fetchPublicResource", () => {
     expect(requests).toEqual(["https://recipes.example/sitemap.xml"]);
   });
 
+  test("rejects encoded custom-path recipe redirects before sending the redirected request", async () => {
+    for (const suffix of ["%2e%2e%2foutside", "%2e%2e%5coutside", "%252e%252e%252foutside"]) {
+      const requests: string[] = [];
+      await expect(fetchPublicResource(new URL("https://recipes.example/recipes/start"), {
+        kind: "recipe",
+        sourceScope: new URL("https://recipes.example/recipes/"),
+      }, {
+        resolveHostname: async () => ["93.184.216.34"],
+        allowTestTransport: true,
+        fetchImpl: async (url) => {
+          requests.push(url.href);
+          if (requests.length === 1) {
+            return new Response(null, { status: 302, headers: { location: `/recipes/${suffix}` } });
+          }
+          return new Response("<html></html>", { headers: { "content-type": "text/html" } });
+        },
+      })).rejects.toThrow("unsafe source path");
+      expect(requests).toEqual(["https://recipes.example/recipes/start"]);
+    }
+  });
+
   test("applies the request gate to every redirect hop", async () => {
     const gated: string[] = [];
     const requested: string[] = [];

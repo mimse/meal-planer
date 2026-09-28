@@ -689,6 +689,81 @@ describe("discoverRecipeUrls", () => {
     expect(result.warnings[1]).toContain("Robots sitemap URL is not a valid URL");
   });
 
+  test("fetches root metadata for a custom path source but omits out-of-path recipe candidates", async () => {
+    const requested: string[] = [];
+    const result = await discoverRecipeUrls({
+      id: "custom",
+      baseUrl: "https://recipes.example/recipes/",
+      discoveryUrl: null,
+      recipeScope: "path",
+    }, {
+      fetch: async (url, kind) => {
+        requested.push(url.href);
+        if (kind === "robots") return resource(url.href, "Sitemap: /sitemap.xml", "text/plain");
+        return resource(url.href, [
+          "<urlset>",
+          "<url><loc>https://recipes.example/blog/not-a-recipe</loc></url>",
+          "<url><loc>https://recipes.example/recipes/valid</loc></url>",
+          "</urlset>",
+        ].join(""), "application/xml");
+      },
+    });
+
+    expect(requested).toEqual([
+      "https://recipes.example/robots.txt",
+      "https://recipes.example/sitemap.xml",
+    ]);
+    expect(result.recipeUrls).toEqual(["https://recipes.example/recipes/valid"]);
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]).toContain("Recipe URL is outside configured source path scope");
+  });
+
+  test("rejects encoded traversal candidates but keeps encoded Unicode within a custom path", async () => {
+    const result = await discoverRecipeUrls({
+      id: "custom",
+      baseUrl: "https://recipes.example/recipes/",
+      discoveryUrl: null,
+      recipeScope: "path",
+    }, {
+      fetch: async (url, kind) => kind === "robots"
+        ? resource(url.href, "Sitemap: /sitemap.xml", "text/plain")
+        : resource(url.href, [
+          "<urlset>",
+          "<url><loc>https://recipes.example/recipes/%2e%2e%2foutside</loc></url>",
+          "<url><loc>https://recipes.example/recipes/%2e%2e%5coutside</loc></url>",
+          "<url><loc>https://recipes.example/recipes/%252e%252e%252foutside</loc></url>",
+          "<url><loc>https://recipes.example/recipes/caf%C3%A9%20soup</loc></url>",
+          "</urlset>",
+        ].join(""), "application/xml"),
+    });
+
+    expect(result.recipeUrls).toEqual(["https://recipes.example/recipes/caf%C3%A9%20soup"]);
+    expect(result.warnings).toHaveLength(3);
+    for (const warning of result.warnings) expect(warning).toContain("unsafe source path");
+  });
+
+  test("rejects an encoded dot segment even when URL parsing would normalize it inside a root scope", async () => {
+    const result = await discoverRecipeUrls({
+      id: "custom-root",
+      baseUrl: "https://recipes.example/",
+      discoveryUrl: null,
+      recipeScope: "path",
+    }, {
+      fetch: async (url, kind) => kind === "robots"
+        ? resource(url.href, "Sitemap: /sitemap.xml", "text/plain")
+        : resource(url.href, [
+          "<urlset>",
+          "<url><loc>https://recipes.example/%2e%2e/outside</loc></url>",
+          "<url><loc>https://recipes.example/caf%C3%A9%20soup</loc></url>",
+          "</urlset>",
+        ].join(""), "application/xml"),
+    });
+
+    expect(result.recipeUrls).toEqual(["https://recipes.example/caf%C3%A9%20soup"]);
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]).toContain("unsafe source path traversal");
+  });
+
   test("reports malformed sitemap XML as unusable", async () => {
     await expect(discoverRecipeUrls({
       id: "example",

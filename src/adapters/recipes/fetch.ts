@@ -3,6 +3,7 @@ import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
 import { Readable } from "node:stream";
+import { assertUrlWithinSourcePath } from "./path-scope";
 
 export type FetchedRecipePage = {
   html: string;
@@ -143,7 +144,12 @@ function validateUrl(url: URL): void {
   }
 }
 
-function validateSourceScope(url: URL, sourceScope: URL | undefined): void {
+function validateSourceScope(
+  url: URL,
+  sourceScope: URL | undefined,
+  kind: PublicResourceKind,
+  rawValue?: string,
+): void {
   if (sourceScope === undefined) return;
   const sourceHost = sourceScope.hostname.toLowerCase().replace(/^www\./u, "");
   const candidateHost = url.hostname.toLowerCase().replace(/^www\./u, "");
@@ -154,6 +160,7 @@ function validateSourceScope(url: URL, sourceScope: URL | undefined): void {
   ) {
     throw new Error(`Resource URL is outside configured source host scope: ${url.href}`);
   }
+  if (kind === "recipe") assertUrlWithinSourcePath(url, sourceScope, "Resource URL", rawValue);
 }
 
 async function resolveValidatedAddress(
@@ -354,11 +361,12 @@ export async function fetchPublicResource(
   const label = options.kind === "recipe" ? "Recipe" : options.kind === "robots" ? "Robots" : "Sitemap";
   let currentUrl = new URL(url);
   currentUrl.hash = "";
+  let rawCurrentUrl: string | undefined;
   let requestHeaders = dependencies.requestInit?.headers;
 
   for (let redirectCount = 0; redirectCount <= maxRedirects; redirectCount += 1) {
     validateUrl(currentUrl);
-    validateSourceScope(currentUrl, options.sourceScope);
+    validateSourceScope(currentUrl, options.sourceScope, options.kind, rawCurrentUrl);
     const validatedAddress = await resolveValidatedAddress(currentUrl, resolveHostname);
     const executeRequest = () => requestImpl(currentUrl, validatedAddress, {
       ...dependencies.requestInit,
@@ -382,6 +390,7 @@ export async function fetchPublicResource(
         requestHeaders = crossOriginRequestHeaders(requestHeaders);
       }
       currentUrl = redirectedUrl;
+      rawCurrentUrl = location;
       continue;
     }
 

@@ -4,7 +4,9 @@
 
 A Bun/TypeScript CLI creates an accepted Monday–Sunday dinner plan and its grocery list. Recipes may come only from:
 
-`valdemarsro.dk`, `gourministeriet.dk`, `spisbedre.dk`, `juliebruun.com/category/opskrifter`, `juliekarla.dk`, and `mummum.dk`.
+`valdemarsro.dk`, `gourministeriet.dk`, `spisbedre.dk`, `juliebruun.com`, `juliekarla.dk`, and `mummum.dk`.
+
+Built-in sources are exact site-scoped identities. In particular, Julie Bruun's configured `/category/opskrifter/` URL is a discovery seed, not a recipe URL prefix; verified recipes such as `/flaeskesteg-i-airfryer/` live outside that category path. Custom sources use their configured base path for recipe candidates and imports through a bounded conservative validator that rejects malformed or structural encodings and traversal, while same-site root `/robots.txt` and sitemap routes remain available for standards-based metadata discovery. Arbitrary same-site pages are never persisted unless the validated Recipe extractor succeeds.
 
 The local plan is authoritative. TilbudsTrolden adds deal scoring and store-grouped shopping data but may never silently reschedule meals.
 

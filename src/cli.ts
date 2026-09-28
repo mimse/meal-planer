@@ -13,6 +13,10 @@ import { readPantry } from "./commands/pantry";
 import { runSetupWorkflow } from "./commands/setup-workflow";
 import type { SetupAnswers } from "./commands/setup";
 import { runSourceTest } from "./application/test-source";
+import { runSourceSync } from "./application/source-sync";
+import { importRecipeUrl, parseRecipeLimit, parseRecipeRequestUrl } from "./application/recipe-ingestion";
+import { parseRecipeReviewPatch, reviewRecipe, type RecipeReviewPatch } from "./application/recipe-review";
+import { DIETARY_TAGS } from "./domain/recipe";
 import {
   addRecipeSource,
   createRecipeSource,
@@ -22,6 +26,15 @@ import {
   validateRecipeSourceId,
 } from "./commands/sources";
 import { openExistingDatabase } from "./infrastructure/database";
+import {
+  createRecipeRepository,
+  parseRecipeId,
+  parseRecipeListOptions,
+  RECIPE_PREFERENCES,
+  SUITABILITY_TAGS,
+  type Recipe,
+} from "./infrastructure/recipe-repository";
+import { createConfigurationRepositories } from "./infrastructure/configuration-repositories";
 import { resolveDatabasePath } from "./infrastructure/database-path";
 import { ClackPromptAdapter } from "./presentation/prompts";
 
@@ -35,6 +48,15 @@ function collect(value: string, previous: string[]): string[] {
   return [...previous, value];
 }
 
+function collectAtMostTwo(value: string, previous: string[]): string[] {
+  return previous.length >= 2 ? previous : [...previous, value];
+}
+
+function singletonOption(values: readonly string[], label: string): string | undefined {
+  if (values.length > 1) throw new Error(`${label} may be specified only once`);
+  return values[0];
+}
+
 function parseJson(value: string, label: string): unknown {
   try {
     return JSON.parse(value);
@@ -46,6 +68,39 @@ function parseJson(value: string, label: string): unknown {
 function databasePath(): string {
   const explicitPath = program.opts<{ database?: string }>().database;
   return resolveDatabasePath(explicitPath === undefined ? {} : { explicitPath });
+}
+
+function oneOf<const Values extends readonly string[]>(value: string, values: Values, label: string): Values[number] {
+  if (!(values as readonly string[]).includes(value)) throw new Error(`Unsupported ${label}: ${value}`);
+  return value as Values[number];
+}
+
+function positiveNumber(value: string, label: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) throw new Error(`${label} must be a positive number`);
+  return parsed;
+}
+
+function nonnegativeInteger(value: string, label: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`${label} must be a non-negative integer`);
+  return parsed;
+}
+
+function rejectSetClearConflict(set: boolean, clear: boolean | undefined, label: string): void {
+  if (set && clear === true) throw new Error(`Cannot set and clear ${label} in the same review`);
+}
+
+function printRecipe(recipe: Recipe): void {
+  console.log(`${recipe.title} [${recipe.id}]`);
+  console.log(`Source: ${recipe.sourceId} · ${recipe.sourceUrl}`);
+  console.log(`Canonical: ${recipe.canonicalUrl}`);
+  console.log(`Fetched: ${recipe.fetchedAt} · parser ${recipe.parserVersion}`);
+  console.log(`Servings: ${recipe.servings ?? "unknown"} · time: ${recipe.totalMinutes ?? "unknown"} min · review: ${recipe.needsReview ? "needed" : "complete"}`);
+  console.log(`Ingredients (${recipe.ingredients.length})`);
+  for (const [index, ingredient] of recipe.ingredients.entries()) console.log(`${index + 1}. ${ingredient.rawText}`);
+  console.log(`Instructions (${recipe.instructions.length})`);
+  for (const [index, instruction] of recipe.instructions.entries()) console.log(`${index + 1}. ${instruction}`);
 }
 
 const prompts = new ClackPromptAdapter();
@@ -240,7 +295,7 @@ sources.command("add")
   });
 
 sources.command("test")
-  .description("Probe bounded sitemap discovery only; recipe extraction is not tested")
+  .description("Probe bounded sitemap discovery only; use sources sync to extract and persist recipes")
   .argument("<source-id>", "stable source id")
   .option("--json", "emit stable JSON")
   .action(async (sourceId: string, options: { json?: boolean }) => {
@@ -256,8 +311,38 @@ sources.command("test")
         for (const recipeUrl of report.sampleRecipeUrls) console.log(`- ${recipeUrl}`);
         console.log(`Cache: ${report.cache.misses} miss, ${report.cache.refreshed} refreshed, ${report.cache.revalidated} revalidated.`);
         for (const warning of report.warnings) console.log(`Warning: ${warning}`);
-        console.log("Discovery only; recipe extraction remains a later Phase 2 increment.");
+        console.log("Discovery only; run sources sync to extract and persist recipes.");
       }
+    } finally {
+      database.close();
+    }
+  });
+
+sources.command("sync")
+  .description("Discover, extract, and persist recipes from one enabled source or all enabled sources")
+  .argument("[source-id]", "stable source id; omitted syncs all enabled sources")
+  .option("--limit <n>", "maximum recipe pages per source (1-100)", collectAtMostTwo, [])
+  .option("--json", "emit stable JSON")
+  .action(async (sourceId: string | undefined, options: { limit: string[]; json?: boolean }) => {
+    const limit = parseRecipeLimit(singletonOption(options.limit, "--limit"));
+    const parsedSourceId = sourceId === undefined ? undefined : validateRecipeSourceId(sourceId);
+    const database = openExistingDatabase(databasePath());
+    try {
+      const report = await runSourceSync(database, {
+        ...(parsedSourceId === undefined ? {} : { sourceId: parsedSourceId }),
+        limit,
+      });
+      if (options.json) {
+        process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+      } else {
+        for (const source of report.sources) {
+          console.log(`${source.sourceId}: ${source.imported}/${source.attempted} imported${source.capped ? " (discovery capped)" : ""}${source.failed > 0 ? `, ${source.failed} failed` : ""}.`);
+          for (const warning of source.warnings) console.log(`Warning: ${warning}`);
+          for (const failure of source.failures) console.log(`Failure${failure.url === null ? "" : ` ${failure.url}`}: ${failure.error}`);
+        }
+        console.log(`Total: ${report.totals.imported} imported, ${report.totals.failed} failed across ${report.totals.sources} source(s).`);
+      }
+      if (report.sources.some(({ status }) => status !== "completed")) process.exitCode = 1;
     } finally {
       database.close();
     }
@@ -297,6 +382,190 @@ sources.command("remove")
 const recipes = program
   .command("recipes")
   .description("Import, inspect, and manage recipes");
+
+recipes.command("search")
+  .description("Search persisted recipes in deterministic title order")
+  .argument("[query]", "title text")
+  .option("--source <source-id>", "configured source id", collectAtMostTwo, [])
+  .option("--tag <dietary-tag>", "dietary tag", collectAtMostTwo, [])
+  .option("--needs-review", "show only recipes needing review")
+  .option("--limit <n>", "maximum results (1-100)", collectAtMostTwo, [])
+  .option("--json", "emit stable JSON")
+  .action((query: string | undefined, options: {
+    source: string[];
+    tag: string[];
+    needsReview?: boolean;
+    limit: string[];
+    json?: boolean;
+  }) => {
+    const limit = parseRecipeLimit(singletonOption(options.limit, "--limit"));
+    const source = singletonOption(options.source, "--source");
+    const tag = singletonOption(options.tag, "--tag");
+    const sourceId = source === undefined ? undefined : validateRecipeSourceId(source);
+    const dietaryTag = tag === undefined ? undefined : oneOf(tag, DIETARY_TAGS, "dietary tag");
+    const listOptions = parseRecipeListOptions({
+      ...(query === undefined ? {} : { query }),
+      ...(sourceId === undefined ? {} : { sourceId }),
+      ...(dietaryTag === undefined ? {} : { dietaryTag }),
+      ...(options.needsReview === true ? { needsReview: true } : {}),
+      limit,
+    });
+    const database = openExistingDatabase(databasePath());
+    try {
+      if (sourceId !== undefined && createConfigurationRepositories(database).recipeSources.get(sourceId) === null) {
+        throw new Error(`Recipe source does not exist: ${sourceId}`);
+      }
+      const repository = createRecipeRepository(database);
+      const result = repository.list(listOptions);
+      if (options.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      else {
+        console.log(`Recipes (${result.length})`);
+        for (const recipe of result) {
+          console.log(`- ${recipe.title} [${recipe.id}] · ${recipe.sourceId}${recipe.needsReview ? " · needs review" : ""}`);
+        }
+      }
+    } finally {
+      database.close();
+    }
+  });
+
+recipes.command("show")
+  .description("Show a persisted recipe with full provenance and ordered evidence")
+  .argument("<recipe-id>", "exact stable recipe id")
+  .option("--json", "emit stable JSON")
+  .action((recipeId: string, options: { json?: boolean }) => {
+    const parsedRecipeId = parseRecipeId(recipeId);
+    const database = openExistingDatabase(databasePath());
+    try {
+      const recipe = createRecipeRepository(database).get(parsedRecipeId);
+      if (recipe === null) throw new Error(`Recipe does not exist: ${parsedRecipeId}`);
+      if (options.json) process.stdout.write(`${JSON.stringify(recipe, null, 2)}\n`);
+      else printRecipe(recipe);
+    } finally {
+      database.close();
+    }
+  });
+
+recipes.command("import")
+  .description("Safely extract and persist one URL from an enabled configured source")
+  .argument("<url>", "recipe page URL")
+  .option("--source <source-id>", "explicit configured source id", collectAtMostTwo, [])
+  .option("--json", "emit stable JSON")
+  .action(async (url: string, options: { source: string[]; json?: boolean }) => {
+    const source = singletonOption(options.source, "--source");
+    const sourceId = source === undefined ? undefined : validateRecipeSourceId(source);
+    parseRecipeRequestUrl(url);
+    const database = openExistingDatabase(databasePath());
+    try {
+      const result = await importRecipeUrl(database, {
+        url,
+        ...(sourceId === undefined ? {} : { sourceId }),
+      });
+      if (options.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      else console.log(`Imported ${result.recipe.title} [${result.recipe.id}] from ${result.sourceId}.`);
+    } finally {
+      database.close();
+    }
+  });
+
+recipes.command("review")
+  .description("Noninteractively review safe recipe classification and planning fields")
+  .argument("<recipe-id>", "exact stable recipe id")
+  .option("--dietary-tag <tag>", "replace dietary tags; repeatable", collect, [])
+  .option("--clear-dietary-tags", "clear all dietary tags")
+  .option("--suitability-tag <tag>", "replace suitability tags; repeatable", collect, [])
+  .option("--clear-suitability-tags", "clear all suitability tags")
+  .option("--cuisine-tag <tag>", "replace cuisine tags; repeatable", collect, [])
+  .option("--clear-cuisine-tags", "clear all cuisine tags")
+  .option("--protein-tag <tag>", "set primary protein classification", collectAtMostTwo, [])
+  .option("--clear-protein-tag", "clear primary protein classification")
+  .option("--preference <value>", "favorite, neutral, or disliked", collectAtMostTwo, [])
+  .option("--servings <n>", "set servings", collectAtMostTwo, [])
+  .option("--clear-servings", "clear servings")
+  .option("--prep-minutes <n>", "set preparation duration", collectAtMostTwo, [])
+  .option("--clear-prep-minutes", "clear preparation duration")
+  .option("--cook-minutes <n>", "set cooking duration", collectAtMostTwo, [])
+  .option("--clear-cook-minutes", "clear cooking duration")
+  .option("--total-minutes <n>", "set total duration", collectAtMostTwo, [])
+  .option("--clear-total-minutes", "clear total duration")
+  .option("--mark-reviewed", "clear needs-review only when planning-critical evidence is complete")
+  .option("--json", "emit stable JSON")
+  .action((recipeId: string, options: {
+    dietaryTag: string[];
+    clearDietaryTags?: boolean;
+    suitabilityTag: string[];
+    clearSuitabilityTags?: boolean;
+    cuisineTag: string[];
+    clearCuisineTags?: boolean;
+    proteinTag: string[];
+    clearProteinTag?: boolean;
+    preference: string[];
+    servings: string[];
+    clearServings?: boolean;
+    prepMinutes: string[];
+    clearPrepMinutes?: boolean;
+    cookMinutes: string[];
+    clearCookMinutes?: boolean;
+    totalMinutes: string[];
+    clearTotalMinutes?: boolean;
+    markReviewed?: boolean;
+    json?: boolean;
+  }) => {
+    const parsedRecipeId = parseRecipeId(recipeId);
+    const proteinTag = singletonOption(options.proteinTag, "--protein-tag");
+    const preference = singletonOption(options.preference, "--preference");
+    const servings = singletonOption(options.servings, "--servings");
+    const prepMinutes = singletonOption(options.prepMinutes, "--prep-minutes");
+    const cookMinutes = singletonOption(options.cookMinutes, "--cook-minutes");
+    const totalMinutes = singletonOption(options.totalMinutes, "--total-minutes");
+    rejectSetClearConflict(options.dietaryTag.length > 0, options.clearDietaryTags, "dietary tags");
+    rejectSetClearConflict(options.suitabilityTag.length > 0, options.clearSuitabilityTags, "suitability tags");
+    rejectSetClearConflict(options.cuisineTag.length > 0, options.clearCuisineTags, "cuisine tags");
+    rejectSetClearConflict(proteinTag !== undefined, options.clearProteinTag, "protein tag");
+    rejectSetClearConflict(servings !== undefined, options.clearServings, "servings");
+    rejectSetClearConflict(prepMinutes !== undefined, options.clearPrepMinutes, "prep minutes");
+    rejectSetClearConflict(cookMinutes !== undefined, options.clearCookMinutes, "cook minutes");
+    rejectSetClearConflict(totalMinutes !== undefined, options.clearTotalMinutes, "total minutes");
+    if (options.markReviewed === true) {
+      if (options.clearServings === true) throw new Error("Cannot mark reviewed while clearing servings");
+      if (options.clearDietaryTags === true) throw new Error("Cannot mark reviewed while clearing dietary tags");
+      if (
+        options.clearPrepMinutes === true
+        && options.clearCookMinutes === true
+        && options.clearTotalMinutes === true
+      ) {
+        throw new Error("Cannot mark reviewed while clearing every duration");
+      }
+    }
+    const patchInput: RecipeReviewPatch = {
+      ...(options.clearDietaryTags === true ? { dietaryTags: [] } : options.dietaryTag.length === 0 ? {} : {
+        dietaryTags: options.dietaryTag.map((tag) => oneOf(tag, DIETARY_TAGS, "dietary tag")),
+      }),
+      ...(options.clearSuitabilityTags === true ? { suitabilityTags: [] } : options.suitabilityTag.length === 0 ? {} : {
+        suitabilityTags: options.suitabilityTag.map((tag) => oneOf(tag, SUITABILITY_TAGS, "suitability tag")),
+      }),
+      ...(options.clearCuisineTags === true ? { cuisineTags: [] } : options.cuisineTag.length === 0 ? {} : { cuisineTags: options.cuisineTag }),
+      ...(options.clearProteinTag === true ? { proteinTag: null } : proteinTag === undefined ? {} : { proteinTag }),
+      ...(preference === undefined ? {} : {
+        preference: oneOf(preference, RECIPE_PREFERENCES, "recipe preference"),
+      }),
+      ...(options.clearServings === true ? { servings: null } : servings === undefined ? {} : { servings: positiveNumber(servings, "Servings") }),
+      ...(options.clearPrepMinutes === true ? { prepMinutes: null } : prepMinutes === undefined ? {} : { prepMinutes: nonnegativeInteger(prepMinutes, "Prep minutes") }),
+      ...(options.clearCookMinutes === true ? { cookMinutes: null } : cookMinutes === undefined ? {} : { cookMinutes: nonnegativeInteger(cookMinutes, "Cook minutes") }),
+      ...(options.clearTotalMinutes === true ? { totalMinutes: null } : totalMinutes === undefined ? {} : { totalMinutes: nonnegativeInteger(totalMinutes, "Total minutes") }),
+      ...(options.markReviewed === true ? { markReviewed: true } : {}),
+    };
+    if (Object.keys(patchInput).length === 0) throw new Error("At least one recipe review option is required");
+    const patch = parseRecipeReviewPatch(patchInput);
+    const database = openExistingDatabase(databasePath());
+    try {
+      const reviewed = reviewRecipe(database, parsedRecipeId, patch);
+      if (options.json) process.stdout.write(`${JSON.stringify(reviewed, null, 2)}\n`);
+      else console.log(`Reviewed ${reviewed.title} [${reviewed.id}] · ${reviewed.needsReview ? "still needs review" : "complete"}.`);
+    } finally {
+      database.close();
+    }
+  });
 
 recipes
   .command("inspect")

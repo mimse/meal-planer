@@ -1,6 +1,7 @@
 import type { PublicResourceKind } from "../adapters/recipes/fetch";
 import type { CachedFetchResult } from "./cached-resource-fetcher";
 import { SaxesParser, type SaxesTagNS } from "saxes";
+import { assertUrlWithinSourcePath } from "../adapters/recipes/path-scope";
 
 const MAX_URL_LENGTH = 2_048;
 const MAX_ROBOTS_LINES = 10_000;
@@ -14,6 +15,7 @@ export type DiscoverySource = {
   readonly id: string;
   readonly baseUrl: string;
   readonly discoveryUrl: string | null;
+  readonly recipeScope?: "path" | "site";
 };
 
 export type DiscoveryFetcher = {
@@ -64,6 +66,8 @@ function assertLimits(limits: DiscoveryLimits): void {
 }
 
 function scopedUrl(value: string | URL, base: URL, label: string): URL {
+  const rawValue = value instanceof URL ? value.href : value;
+  if (/%(?![0-9a-f]{2})/iu.test(rawValue)) throw new Error(`${label} contains a malformed percent escape`);
   let url: URL;
   try {
     url = value instanceof URL ? new URL(value) : new URL(value, base);
@@ -337,6 +341,9 @@ export async function discoverRecipeUrls(
           for (const location of parsed.locations) {
             try {
               const recipeUrl = scopedUrl(location, base, "Recipe URL");
+              if (source.recipeScope !== "site") {
+                assertUrlWithinSourcePath(recipeUrl, base, "Recipe URL", location);
+              }
               const recipeKey = canonicalScopeKey(recipeUrl);
               if (!recipeSeen.has(recipeKey)) {
                 if (recipeUrls.length >= limits.maxRecipeUrls) {

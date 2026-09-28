@@ -12,6 +12,7 @@ const MAX_INGREDIENTS = 500;
 const MAX_INSTRUCTIONS = 500;
 const MAX_RAW_PAYLOAD_BYTES = 1_000_000;
 const MAX_EVIDENCE_BYTES = 250_000;
+const MAX_SOURCE_IDENTITY_CANDIDATES = 10_000;
 
 export const SUITABILITY_TAGS = [
   "quick",
@@ -24,6 +25,7 @@ export const SUITABILITY_TAGS = [
 export const RECIPE_PREFERENCES = ["favorite", "neutral", "disliked"] as const;
 
 const identifierSchema = z.string().trim().min(1).max(100).regex(/^[a-z0-9][a-z0-9_-]*$/i);
+const recipeIdSchema = z.string().regex(/^recipe:[a-f0-9]{64}$/);
 const boundedText = (maximum: number, emptyMessage: string) => z.string().max(maximum).refine(
   (value) => value.trim().length > 0,
   emptyMessage,
@@ -85,6 +87,8 @@ export type Recipe = RecipeImport & {
   readonly normalizedTitle: string;
 };
 
+export type RecipeSourceRefreshMerge = (incoming: RecipeImport, existing: Recipe) => RecipeImport;
+
 const sqliteBooleanSchema = z.union([z.literal(0), z.literal(1)]);
 const recipeRowSchema = z.object({
   id: z.string().regex(/^recipe:[a-f0-9]{64}$/),
@@ -140,6 +144,17 @@ const listOptionsSchema = z.object({
 
 export type RecipeListOptions = z.input<typeof listOptionsSchema>;
 
+export function parseRecipeId(value: unknown): string {
+  return recipeIdSchema.parse(value);
+}
+
+export function parseRecipeListOptions(value: unknown): z.output<typeof listOptionsSchema> {
+  const parsed = listOptionsSchema.parse(value);
+  if (parsed.query !== undefined) normalizeRecipeTitle(parsed.query);
+  if (parsed.cuisineTag !== undefined) normalizeRecipeTag(parsed.cuisineTag);
+  return parsed;
+}
+
 function normalizeText(value: string): string {
   return value.normalize("NFKC").trim().replace(/\s+/gu, " ").toLocaleLowerCase("da-DK");
 }
@@ -148,7 +163,7 @@ export function normalizeRecipeTitle(value: string): string {
   return z.string().min(1).max(MAX_TITLE_LENGTH).parse(normalizeText(value));
 }
 
-function normalizeTag(value: string): string {
+export function normalizeRecipeTag(value: string): string {
   const normalized = normalizeText(value).replace(/\s+/gu, "-");
   return normalizedTagSchema.parse(normalized);
 }
@@ -193,7 +208,7 @@ function createRecipeIdFromIdentityKey(identityKey: string): string {
 }
 
 function normalizeUniqueTags(values: readonly string[], label: string): string[] {
-  const normalized = values.map(normalizeTag);
+  const normalized = values.map(normalizeRecipeTag);
   if (new Set(normalized).size !== normalized.length) {
     throw new Error(`${label} contain duplicate normalized values`);
   }
@@ -272,7 +287,7 @@ function normalizeImport(input: unknown): RecipeImport & { readonly normalizedTi
     normalizedTitle,
     author: parsed.author === null ? null : parsed.author.trim(),
     cuisineTags: normalizeUniqueTags(parsed.cuisineTags, "Cuisine tags"),
-    proteinTag: parsed.proteinTag === null ? null : normalizeTag(parsed.proteinTag),
+    proteinTag: parsed.proteinTag === null ? null : normalizeRecipeTag(parsed.proteinTag),
     dietaryTags: normalizeUniqueTags(parsed.dietaryTags, "Dietary tags") as RecipeImport["dietaryTags"],
     suitabilityTags: (() => {
       if (new Set(parsed.suitabilityTags).size !== parsed.suitabilityTags.length) {
@@ -311,15 +326,21 @@ export class RecipeRepository {
   constructor(private readonly database: Database) {}
 
   import(input: unknown): Recipe {
+    return this.importInternal(input);
+  }
+
+  /**
+   * Resolves identity first, then lets the application merge review-owned
+   * fields in the same transaction before persistence.
+   */
+  importSourceRefresh(input: unknown, merge: RecipeSourceRefreshMerge): Recipe {
+    return this.importInternal(input, merge);
+  }
+
+  private importInternal(input: unknown, merge?: RecipeSourceRefreshMerge): Recipe {
     const recipe = normalizeImport(input);
     const normalizedCanonicalUrl = normalizeRecipeCanonicalUrl(recipe.canonicalUrl);
     const requestedIdentityKey = identityKeyForCanonicalUrl(recipe.canonicalUrl);
-    const rawSourcePayloadJson = encodeJson(
-      recipe.rawSourcePayload,
-      "Raw recipe source payload",
-      MAX_RAW_PAYLOAD_BYTES,
-    );
-    const sourceEvidenceJson = encodeJson(recipe.sourceEvidence, "Recipe source evidence", MAX_EVIDENCE_BYTES);
 
     return this.database.transaction(() => {
       const canonicalMatch = this.database.query<{ id: string }, [string]>(
@@ -337,6 +358,19 @@ export class RecipeRepository {
       const titleMatch = this.database.query<{ id: string }, [string, string]>(
         "SELECT id FROM recipes WHERE source_id = ? AND normalized_title = ?",
       ).get(recipe.sourceId, recipe.normalizedTitle);
+      const normalizedSourceUrl = normalizeRecipeCanonicalUrl(recipe.sourceUrl);
+      const sourceCandidates = this.database.query<{ id: string; sourceUrl: string }, [string, number]>(
+        "SELECT id, source_url AS sourceUrl FROM recipes WHERE source_id = ? LIMIT ?",
+      ).all(recipe.sourceId, MAX_SOURCE_IDENTITY_CANDIDATES + 1);
+      if (sourceCandidates.length > MAX_SOURCE_IDENTITY_CANDIDATES) {
+        throw new Error("Recipe source URL identity lookup exceeded its bounded candidate limit");
+      }
+      const sourceMatches = sourceCandidates.filter(({ sourceUrl }) =>
+        normalizeRecipeCanonicalUrl(sourceUrl) === normalizedSourceUrl);
+      if (sourceMatches.length > 1) {
+        throw new Error("Recipe import is ambiguous: source URL matches multiple recipes in one source");
+      }
+      const sourceMatch = sourceMatches[0] ?? null;
       if (canonicalMatch !== null && identityMatch !== null && canonicalMatch.id !== identityMatch.id) {
         throw new Error("Recipe import is ambiguous: current canonical URL and stable canonical identity differ");
       }
@@ -352,9 +386,20 @@ export class RecipeRepository {
         throw new Error("Recipe import is ambiguous: canonical identity and source/title match different recipes");
       }
       if (
+        sourceMatch !== null
+        && canonicalIdentityMatch !== null
+        && sourceMatch.id !== canonicalIdentityMatch.id
+      ) {
+        throw new Error("Recipe import is ambiguous: source URL and canonical identity match different recipes");
+      }
+      if (sourceMatch !== null && titleMatch !== null && sourceMatch.id !== titleMatch.id) {
+        throw new Error("Recipe import is ambiguous: source URL and source/title match different recipes");
+      }
+      if (
         canonicalMatch === null
         && identityMatch !== null
         && titleMatch === null
+        && sourceMatch === null
         && (
           identityMatch.sourceId !== recipe.sourceId
           || identityMatch.normalizedTitle !== recipe.normalizedTitle
@@ -363,7 +408,7 @@ export class RecipeRepository {
         throw new Error("Recipe import is ambiguous: historical canonical identity does not match source/title");
       }
 
-      const existingId = canonicalIdentityMatch?.id ?? titleMatch?.id;
+      const existingId = canonicalIdentityMatch?.id ?? titleMatch?.id ?? sourceMatch?.id;
       const id = existingId ?? createRecipeIdFromIdentityKey(requestedIdentityKey);
       const idRow = this.database.query<{ id: string; identityKey: string }, [string]>(
         "SELECT id, identity_key AS identityKey FROM recipes WHERE id = ?",
@@ -372,6 +417,31 @@ export class RecipeRepository {
         throw new Error(`Recipe identity collision for ${id}`);
       }
       const identityKey = idRow?.identityKey ?? requestedIdentityKey;
+      let recipeToPersist = recipe;
+      if (merge !== undefined && existingId !== undefined) {
+        const existing = this.getInCurrentTransaction(existingId);
+        if (existing === null) throw new Error(`Existing recipe could not be read: ${existingId}`);
+        const { normalizedTitle: _normalizedTitle, ...incoming } = recipe;
+        recipeToPersist = normalizeImport(merge(incoming, existing));
+        if (
+          recipeToPersist.sourceId !== recipe.sourceId
+          || recipeToPersist.sourceUrl !== recipe.sourceUrl
+          || recipeToPersist.canonicalUrl !== recipe.canonicalUrl
+          || recipeToPersist.title !== recipe.title
+        ) {
+          throw new Error("Source refresh merge changed source-owned recipe identity");
+        }
+      }
+      const rawSourcePayloadJson = encodeJson(
+        recipeToPersist.rawSourcePayload,
+        "Raw recipe source payload",
+        MAX_RAW_PAYLOAD_BYTES,
+      );
+      const sourceEvidenceJson = encodeJson(
+        recipeToPersist.sourceEvidence,
+        "Recipe source evidence",
+        MAX_EVIDENCE_BYTES,
+      );
 
       this.database.query(`
         INSERT INTO recipes (
@@ -406,26 +476,26 @@ export class RecipeRepository {
       `).run(
         id,
         identityKey,
-        recipe.sourceId,
-        recipe.sourceUrl,
-        recipe.canonicalUrl,
+        recipeToPersist.sourceId,
+        recipeToPersist.sourceUrl,
+        recipeToPersist.canonicalUrl,
         normalizedCanonicalUrl,
-        recipe.title,
-        recipe.normalizedTitle,
-        recipe.author,
-        recipe.servings,
-        recipe.prepMinutes,
-        recipe.cookMinutes,
-        recipe.totalMinutes,
-        JSON.stringify(recipe.cuisineTags),
-        recipe.proteinTag,
-        JSON.stringify(recipe.dietaryTags),
-        JSON.stringify(recipe.suitabilityTags),
-        recipe.extraMealServings,
-        recipe.preference,
-        recipe.needsReview ? 1 : 0,
-        recipe.parserVersion,
-        recipe.fetchedAt,
+        recipeToPersist.title,
+        recipeToPersist.normalizedTitle,
+        recipeToPersist.author,
+        recipeToPersist.servings,
+        recipeToPersist.prepMinutes,
+        recipeToPersist.cookMinutes,
+        recipeToPersist.totalMinutes,
+        JSON.stringify(recipeToPersist.cuisineTags),
+        recipeToPersist.proteinTag,
+        JSON.stringify(recipeToPersist.dietaryTags),
+        JSON.stringify(recipeToPersist.suitabilityTags),
+        recipeToPersist.extraMealServings,
+        recipeToPersist.preference,
+        recipeToPersist.needsReview ? 1 : 0,
+        recipeToPersist.parserVersion,
+        recipeToPersist.fetchedAt,
         rawSourcePayloadJson,
         sourceEvidenceJson,
       );
@@ -437,7 +507,7 @@ export class RecipeRepository {
           recipe_id, ordinal, raw_text, normalized_name, quantity, unit, uncertain
         ) VALUES (?, ?, ?, ?, ?, ?, ?)
       `);
-      for (const [ordinal, ingredient] of recipe.ingredients.entries()) {
+      for (const [ordinal, ingredient] of recipeToPersist.ingredients.entries()) {
         insertIngredient.run(
           id,
           ordinal,
@@ -451,7 +521,7 @@ export class RecipeRepository {
       const insertInstruction = this.database.query(`
         INSERT INTO recipe_instructions (recipe_id, ordinal, text) VALUES (?, ?, ?)
       `);
-      for (const [ordinal, instruction] of recipe.instructions.entries()) {
+      for (const [ordinal, instruction] of recipeToPersist.instructions.entries()) {
         insertInstruction.run(id, ordinal, instruction);
       }
 
@@ -462,7 +532,7 @@ export class RecipeRepository {
   }
 
   get(id: string): Recipe | null {
-    const parsedId = z.string().regex(/^recipe:[a-f0-9]{64}$/).parse(id);
+    const parsedId = parseRecipeId(id);
     return this.database.transaction(() => this.getInCurrentTransaction(parsedId))();
   }
 
@@ -475,7 +545,7 @@ export class RecipeRepository {
   }
 
   list(options: RecipeListOptions = {}): Recipe[] {
-    const parsed = listOptionsSchema.parse(options);
+    const parsed = parseRecipeListOptions(options);
     const clauses: string[] = [];
     const parameters: Array<string | number> = [];
     if (parsed.sourceId !== undefined) {
@@ -489,7 +559,7 @@ export class RecipeRepository {
     }
     if (parsed.cuisineTag !== undefined) {
       clauses.push("EXISTS (SELECT 1 FROM json_each(cuisine_tags) WHERE value = ?)");
-      parameters.push(normalizeTag(parsed.cuisineTag));
+      parameters.push(normalizeRecipeTag(parsed.cuisineTag));
     }
     if (parsed.dietaryTag !== undefined) {
       clauses.push("EXISTS (SELECT 1 FROM json_each(dietary_tags) WHERE value = ?)");
@@ -522,7 +592,7 @@ export class RecipeRepository {
   }
 
   remove(id: string): boolean {
-    const parsedId = z.string().regex(/^recipe:[a-f0-9]{64}$/).parse(id);
+    const parsedId = parseRecipeId(id);
     return this.database.query("DELETE FROM recipes WHERE id = ?").run(parsedId).changes > 0;
   }
 
