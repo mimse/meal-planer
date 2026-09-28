@@ -1,5 +1,9 @@
 export type RecipeExtractionKind = "jsonld" | "microdata" | "spisbedre-inertia";
 
+export function normalizeRecipeSourceHost(hostname: string): string {
+  return hostname.toLowerCase().replace(/^www\./u, "");
+}
+
 export type BuiltInRecipeSource = {
   id: string;
   name: string;
@@ -59,3 +63,15 @@ export const BUILT_IN_RECIPE_SOURCES: readonly BuiltInRecipeSource[] = [
     extraction: "jsonld",
   },
 ] as const;
+
+export function isBuiltInRecipeExtractionHost(kind: RecipeExtractionKind, pageUrl: URL): boolean {
+  if (
+    (pageUrl.protocol !== "http:" && pageUrl.protocol !== "https:")
+    || pageUrl.username !== ""
+    || pageUrl.password !== ""
+    || /%(?![0-9a-f]{2})/iu.test(pageUrl.href)
+  ) return false;
+  const host = normalizeRecipeSourceHost(pageUrl.hostname);
+  return BUILT_IN_RECIPE_SOURCES.some((source) =>
+    source.extraction === kind && normalizeRecipeSourceHost(source.host) === host);
+}

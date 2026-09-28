@@ -1,37 +1,125 @@
 import { load } from "cheerio";
+import {
+  normalizeSchemaDietaryTags,
+  tryResolveHttpUrl,
+  validateExtractedRecipe,
+  type ExtractedRecipe,
+} from "./extraction";
 
-export type ExtractedRecipe = {
-  title: string;
-  sourceUrl: string;
-  canonicalUrl: string;
-  author: string | null;
-  servings: number | null;
-  prepMinutes: number | null;
-  cookMinutes: number | null;
-  totalMinutes: number | null;
-  rawIngredients: string[];
-  instructions: string[];
-  dietaryTags: string[];
-  raw: Record<string, unknown>;
-};
+export type { ExtractedRecipe } from "./extraction";
 
 type JsonLdNode = Record<string, unknown>;
+
+const MAX_JSON_LD_BLOCK_BYTES = 2_000_000;
+const MAX_JSON_LD_PAGE_BYTES = 2_100_000;
+const MAX_JSON_LD_BLOCK_NODES = 10_000;
+const MAX_JSON_LD_PAGE_NODES = 50_000;
+const MAX_JSON_LD_CONTAINER_ITEMS = 10_000;
+const MAX_JSON_LD_BLOCK_ITEMS = 20_000;
+const MAX_JSON_LD_PAGE_ITEMS = 100_000;
+const MAX_JSON_LD_DEPTH = 30;
+const MAX_JSON_LD_BLOCK_TEXT_BYTES = 250_000;
+const MAX_JSON_LD_PAGE_TEXT_BYTES = 500_000;
+
+type JsonLdPageBudget = {
+  bytes: number;
+  nodes: number;
+  items: number;
+  textBytes: number;
+};
+
+function utf8Bytes(value: string): number {
+  return Buffer.byteLength(value, "utf8");
+}
 
 function isObject(value: unknown): value is JsonLdNode {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function flattenNodes(value: unknown): JsonLdNode[] {
-  if (Array.isArray(value)) {
-    return value.flatMap(flattenNodes);
+function boundedJsonLdNodes(value: unknown, page: JsonLdPageBudget): JsonLdNode[] {
+  const candidates: JsonLdNode[] = [];
+  const stack: Array<{ value: unknown; depth: number; candidate: boolean }> = [
+    { value, depth: 0, candidate: true },
+  ];
+  let blockNodes = 0;
+  let blockItems = 0;
+  let blockTextBytes = 0;
+
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    blockNodes += 1;
+    page.nodes += 1;
+    if (blockNodes > MAX_JSON_LD_BLOCK_NODES || page.nodes > MAX_JSON_LD_PAGE_NODES) {
+      throw new Error("Schema.org JSON-LD exceeds aggregate node limits");
+    }
+    if (current.depth > MAX_JSON_LD_DEPTH) {
+      throw new Error(`Schema.org JSON-LD exceeds maximum depth ${MAX_JSON_LD_DEPTH}`);
+    }
+
+    if (typeof current.value === "string") {
+      const bytes = utf8Bytes(current.value);
+      blockTextBytes += bytes;
+      page.textBytes += bytes;
+      if (
+        blockTextBytes > MAX_JSON_LD_BLOCK_TEXT_BYTES
+        || page.textBytes > MAX_JSON_LD_PAGE_TEXT_BYTES
+      ) throw new Error("Schema.org JSON-LD exceeds aggregate text limits");
+      continue;
+    }
+    if (
+      current.value === null
+      || typeof current.value === "boolean"
+      || typeof current.value === "number"
+    ) continue;
+
+    if (Array.isArray(current.value)) {
+      if (current.value.length > MAX_JSON_LD_CONTAINER_ITEMS) {
+        throw new Error(`Schema.org JSON-LD array exceeds ${MAX_JSON_LD_CONTAINER_ITEMS} items`);
+      }
+      blockItems += current.value.length;
+      page.items += current.value.length;
+      if (blockItems > MAX_JSON_LD_BLOCK_ITEMS || page.items > MAX_JSON_LD_PAGE_ITEMS) {
+        throw new Error("Schema.org JSON-LD exceeds aggregate item limits");
+      }
+      for (let index = current.value.length - 1; index >= 0; index -= 1) {
+        stack.push({
+          value: current.value[index],
+          depth: current.depth + 1,
+          candidate: current.candidate,
+        });
+      }
+      continue;
+    }
+    if (!isObject(current.value)) continue;
+
+    const entries = Object.entries(current.value);
+    if (entries.length > MAX_JSON_LD_CONTAINER_ITEMS) {
+      throw new Error(`Schema.org JSON-LD object exceeds ${MAX_JSON_LD_CONTAINER_ITEMS} entries`);
+    }
+    blockItems += entries.length;
+    page.items += entries.length;
+    if (blockItems > MAX_JSON_LD_BLOCK_ITEMS || page.items > MAX_JSON_LD_PAGE_ITEMS) {
+      throw new Error("Schema.org JSON-LD exceeds aggregate item limits");
+    }
+    if (current.candidate) candidates.push(current.value);
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      const [key, child] = entries[index]!;
+      const keyBytes = utf8Bytes(key);
+      blockTextBytes += keyBytes;
+      page.textBytes += keyBytes;
+      if (
+        blockTextBytes > MAX_JSON_LD_BLOCK_TEXT_BYTES
+        || page.textBytes > MAX_JSON_LD_PAGE_TEXT_BYTES
+      ) throw new Error("Schema.org JSON-LD exceeds aggregate text limits");
+      stack.push({
+        value: child,
+        depth: current.depth + 1,
+        candidate: current.candidate && key === "@graph",
+      });
+    }
   }
 
-  if (!isObject(value)) {
-    return [];
-  }
-
-  const graph = value["@graph"];
-  return graph === undefined ? [value] : [value, ...flattenNodes(graph)];
+  return candidates;
 }
 
 function hasType(node: JsonLdNode, expected: string): boolean {
@@ -58,7 +146,7 @@ function parseDuration(value: unknown): number | null {
   const minutes = Number(match[1] ?? 0) * 1_440
     + Number(match[2] ?? 0) * 60
     + Number(match[3] ?? 0);
-  return Number.isFinite(minutes) && minutes >= 0 ? minutes : null;
+  return Number.isSafeInteger(minutes) && minutes >= 0 && minutes <= 525_600 ? minutes : null;
 }
 
 function parseServings(value: unknown): number | null {
@@ -95,16 +183,14 @@ function extractInstructions(value: unknown): string[] {
 
 function extractDietaryTags(value: unknown): string[] {
   const values = Array.isArray(value) ? value : [value];
-  return values.flatMap((entry) => {
-    if (typeof entry !== "string") return [];
-    const name = entry.split("/").filter(Boolean).at(-1)?.replace(/Diet$/, "").toLowerCase();
-    return name ? [name] : [];
-  });
+  return normalizeSchemaDietaryTags(values);
 }
 
-function resolveUrl(value: unknown, fallback: URL): string {
+function resolveRecipeUrl(value: unknown, fallback: URL): string {
   if (typeof value !== "string" || !value.trim()) return fallback.href;
-  return new URL(value, fallback).href;
+  const resolved = tryResolveHttpUrl(value, fallback);
+  if (resolved === null) throw new Error("Recipe source URL is invalid or disallowed");
+  return resolved;
 }
 
 function extractCandidate(
@@ -115,16 +201,9 @@ function extractCandidate(
   if (!isValidRecipe(raw)) return null;
 
   try {
-    const sourceUrl = resolveUrl(raw.url, pageUrl);
-    let canonicalUrl = sourceUrl;
-    if (canonicalHref) {
-      try {
-        canonicalUrl = resolveUrl(canonicalHref, pageUrl);
-      } catch {
-        // Canonical metadata is optional evidence; keep the valid recipe URL.
-      }
-    }
-    return {
+    const sourceUrl = resolveRecipeUrl(raw.url, pageUrl);
+    const canonicalUrl = tryResolveHttpUrl(canonicalHref, pageUrl) ?? sourceUrl;
+    return validateExtractedRecipe({
       title: raw.name.trim(),
       sourceUrl,
       canonicalUrl,
@@ -139,7 +218,7 @@ function extractCandidate(
       instructions: extractInstructions(raw.recipeInstructions),
       dietaryTags: extractDietaryTags(raw.suitableForDiet),
       raw,
-    };
+    });
   } catch {
     return null;
   }
@@ -147,24 +226,41 @@ function extractCandidate(
 
 export function extractRecipeJsonLd(html: string, pageUrl: URL): ExtractedRecipe {
   const $ = load(html);
-  const nodes: JsonLdNode[] = [];
+  const canonicalHref = $('link[rel="canonical"]').first().attr("href");
+  const pageBudget: JsonLdPageBudget = { bytes: 0, nodes: 0, items: 0, textBytes: 0 };
+  let pageLimitExceeded = false;
 
-  $('script[type="application/ld+json"]').each((_, element) => {
+  for (const element of $('script[type="application/ld+json"]').toArray()) {
     const text = $(element).text().trim();
-    if (!text) return;
+    if (!text) continue;
+
+    const textBytes = utf8Bytes(text);
+    pageBudget.bytes += textBytes;
+    if (pageBudget.bytes > MAX_JSON_LD_PAGE_BYTES) {
+      pageLimitExceeded = true;
+      break;
+    }
+    if (textBytes > MAX_JSON_LD_BLOCK_BYTES) continue;
 
     try {
-      nodes.push(...flattenNodes(JSON.parse(text)));
+      const nodes = boundedJsonLdNodes(JSON.parse(text), pageBudget);
+      for (const node of nodes) {
+        const recipe = extractCandidate(node, pageUrl, canonicalHref);
+        if (recipe) return recipe;
+      }
     } catch {
       // A malformed block must not hide a valid Recipe block elsewhere on the page.
+      if (
+        pageBudget.nodes > MAX_JSON_LD_PAGE_NODES
+        || pageBudget.items > MAX_JSON_LD_PAGE_ITEMS
+        || pageBudget.textBytes > MAX_JSON_LD_PAGE_TEXT_BYTES
+      ) {
+        pageLimitExceeded = true;
+        break;
+      }
     }
-  });
-
-  const canonicalHref = $('link[rel="canonical"]').first().attr("href");
-  for (const node of nodes) {
-    const recipe = extractCandidate(node, pageUrl, canonicalHref);
-    if (recipe) return recipe;
   }
 
+  if (pageLimitExceeded) throw new Error("Schema.org JSON-LD exceeds page-wide resource limits");
   throw new Error(`No valid Schema.org Recipe found at ${pageUrl.href}`);
 }

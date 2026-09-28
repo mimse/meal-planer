@@ -95,6 +95,24 @@ describe("extractRecipeJsonLd", () => {
     });
   });
 
+  test("ignores syntactically valid but disallowed optional canonical URLs", () => {
+    for (const canonical of [
+      "ftp://example.dk/recipe",
+      "https://user:secret@example.dk/recipe",
+      `https://example.dk/${"x".repeat(2_100)}`,
+    ]) {
+      const html = `<link rel="canonical" href="${canonical}">
+        <script type="application/ld+json">{
+          "@type":"Recipe","name":"Valid recipe","url":"/valid"
+        }</script>`;
+      expect(extractRecipeJsonLd(html, pageUrl)).toMatchObject({
+        title: "Valid recipe",
+        sourceUrl: "https://example.dk/valid",
+        canonicalUrl: "https://example.dk/valid",
+      });
+    }
+  });
+
   test("extracts instructions from a single HowToSection object", () => {
     const html = `
       <script type="application/ld+json">
@@ -157,5 +175,61 @@ describe("extractRecipeJsonLd", () => {
       cookMinutes: null,
       totalMinutes: null,
     });
+  });
+
+  test("accepts bounded ISO durations and returns null above the persistence limit", () => {
+    const html = `<script type="application/ld+json">${JSON.stringify({
+      "@type": "Recipe",
+      name: "Soup",
+      prepTime: "P365D",
+      totalTime: "P366D",
+    })}</script>`;
+
+    expect(extractRecipeJsonLd(html, pageUrl)).toMatchObject({
+      prepMinutes: 525_600,
+      totalMinutes: null,
+    });
+  });
+
+  test("skips candidates rejected by the shared output boundary", () => {
+    const unsafe = '{"@type":"Recipe","name":"Unsafe","__proto__":{"polluted":true}}';
+    const valid = '{"@type":"Recipe","name":"Safe"}';
+    const html = `<script type="application/ld+json">[${unsafe},${valid}]</script>`;
+
+    expect(extractRecipeJsonLd(html, pageUrl).title).toBe("Safe");
+  });
+
+  test("rejects a near-1.8MB wide block before choosing a later valid block", () => {
+    const wide = `[{"@type":"Recipe","name":"Adversarial"},${"0,".repeat(899_000)}0]`;
+    const html = `<script type="application/ld+json">${wide}</script>
+      <script type="application/ld+json">{"@type":"Recipe","name":"Later valid"}</script>`;
+
+    expect(Buffer.byteLength(wide, "utf8")).toBeGreaterThan(1_790_000);
+    expect(extractRecipeJsonLd(html, pageUrl).title).toBe("Later valid");
+  });
+
+  test("rejects an over-depth block without recursion and chooses a later valid block", () => {
+    let deep = '{"@type":"Recipe","name":"Too deep"}';
+    for (let index = 0; index < 100; index += 1) deep = `{"@graph":${deep}}`;
+    const html = `<script type="application/ld+json">${deep}</script>
+      <script type="application/ld+json">{"@type":"Recipe","name":"Later valid"}</script>`;
+
+    expect(extractRecipeJsonLd(html, pageUrl).title).toBe("Later valid");
+  });
+
+  test("continues after malformed JSON and extracts a later valid block", () => {
+    const html = `<script type="application/ld+json">{"@type":"Recipe",</script>
+      <script type="application/ld+json">{"@type":"Recipe","name":"Later valid"}</script>`;
+
+    expect(extractRecipeJsonLd(html, pageUrl).title).toBe("Later valid");
+  });
+
+  test("reports a precise bounded failure when page-wide JSON-LD work is exhausted", () => {
+    const block = JSON.stringify({ padding: "x".repeat(110_000) });
+    const html = Array.from({ length: 6 }, () =>
+      `<script type="application/ld+json">${block}</script>`).join("");
+
+    expect(() => extractRecipeJsonLd(html, pageUrl))
+      .toThrow("Schema.org JSON-LD exceeds page-wide resource limits");
   });
 });

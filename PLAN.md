@@ -347,7 +347,7 @@ Recommended dependencies:
 
 ### Phase 0 — integration spikes
 
-**Current scope:** Phase 0 is complete. The repository contains the CLI shell, pinned-server compatibility probe, recipe fetch/extraction path, source findings, the backward-compatible `structuredContent` patch and contract tests for `score_recipes` and `generate_shopping_list`, and compact deterministic HTML fixtures for all six built-in recipe sources. Production custom source adapters, persistence, and planning remain later-phase work.
+**Current scope:** Phase 0 is complete. The repository contains the CLI shell, pinned-server compatibility probe, recipe fetch/extraction path, source findings, the backward-compatible `structuredContent` patch and contract tests for `score_recipes` and `generate_shopping_list`, and compact deterministic HTML fixtures for all six built-in recipe sources. Phase 2 now also has production JSON-LD, Valdemarsro microdata, and SPIS BEDRE Inertia extraction adapters behind an explicit validated registry. Persistence exists, while source synchronization/import and planning remain later-phase work.
 
 - Initialize the Bun/TypeScript CLI.
 - Pin and build TilbudsTrolden.
@@ -371,7 +371,7 @@ Exit criterion: configuration survives process restarts and can be edited non-in
 
 ### Phase 2 — recipe ingestion
 
-**Current scope:** The safe discovery increment is complete: the shared public HTTP(S) transport preserves DNS pinning and redirect revalidation, source probing is host-scoped and bounded, requests are rate-limited per host, and validated responses use a bounded conditional SQLite cache. `sources test` reports discovery evidence only. Recipe extraction during probing, synchronization/import, production microdata/Inertia adapters, and recipe search/import commands remain future Phase 2 increments.
+**Current scope:** The safe discovery increment and production extraction layer are complete: the shared public HTTP(S) transport preserves DNS pinning and redirect revalidation, source probing is host-scoped and bounded, requests are rate-limited per host, and validated responses use a bounded conditional SQLite cache. The extraction registry supports configured `auto`, `jsonld`, `microdata`, and `spisbedre-inertia` modes, maps all six built-ins, and validates bounded output from generic JSON-LD, Valdemarsro microdata, and SPIS BEDRE Inertia payloads. `sources test` still reports discovery evidence only. Source synchronization/import and recipe search/import commands remain future Phase 2 increments.
 
 - Build HTTP safety, caching, rate limiting, and the generic JSON-LD adapter.
 - Add source registry and source-management commands.

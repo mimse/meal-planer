@@ -1,6 +1,9 @@
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { DIETARY_TAGS } from "../domain/recipe";
+
+export { DIETARY_TAGS } from "../domain/recipe";
 
 const MAX_URL_LENGTH = 2_048;
 const MAX_TITLE_LENGTH = 500;
@@ -9,20 +12,6 @@ const MAX_INGREDIENTS = 500;
 const MAX_INSTRUCTIONS = 500;
 const MAX_RAW_PAYLOAD_BYTES = 1_000_000;
 const MAX_EVIDENCE_BYTES = 250_000;
-
-export const DIETARY_TAGS = [
-  "diabetic",
-  "gluten-free",
-  "halal",
-  "hindu",
-  "kosher",
-  "low-calorie",
-  "low-fat",
-  "low-lactose",
-  "low-salt",
-  "vegan",
-  "vegetarian",
-] as const;
 
 export const SUITABILITY_TAGS = [
   "quick",
