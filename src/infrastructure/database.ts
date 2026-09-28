@@ -18,6 +18,7 @@ const REQUIRED_RECIPE_TABLES = [
   "recipe_ingredients",
   "recipe_instructions",
 ] as const;
+const REQUIRED_CACHE_TABLES = ["http_cache"] as const;
 
 function assertApplicationDatabase(database: Database): void {
   const tableNames = new Set(database
@@ -34,6 +35,12 @@ function assertApplicationDatabase(database: Database): void {
   if (
     appliedMigrations.some(({ version }) => version >= 2)
     && REQUIRED_RECIPE_TABLES.some((tableName) => !tableNames.has(tableName))
+  ) {
+    throw new Error("Family configuration does not exist. Run mealplan setup first.");
+  }
+  if (
+    appliedMigrations.some(({ version }) => version >= 3)
+    && REQUIRED_CACHE_TABLES.some((tableName) => !tableNames.has(tableName))
   ) {
     throw new Error("Family configuration does not exist. Run mealplan setup first.");
   }

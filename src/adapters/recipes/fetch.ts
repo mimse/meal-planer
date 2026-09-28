@@ -9,12 +9,39 @@ export type FetchedRecipePage = {
   url: URL;
 };
 
-type RecipeRequest = (
+type PublicRequest = (
   url: URL,
   validatedAddress: string,
   init: RequestInit,
   timeoutMs: number,
 ) => Promise<Response>;
+
+type RecipeRequest = PublicRequest;
+
+export type PublicResourceKind = "robots" | "sitemap" | "recipe";
+
+export type PublicResourceLimits = {
+  readonly robots: number;
+  readonly sitemap: number;
+  readonly recipe: number;
+  readonly absolute: number;
+};
+
+export type PublicResourceOptions = {
+  readonly kind: PublicResourceKind;
+  readonly limits?: PublicResourceLimits;
+  readonly allowNotModified?: boolean;
+  readonly sourceScope?: URL;
+};
+
+export type FetchedPublicResource = {
+  readonly body: string;
+  readonly url: URL;
+  readonly mediaType: string | null;
+  readonly status: 200 | 304;
+  readonly etag: string | null;
+  readonly lastModified: string | null;
+};
 
 export type RecipeFetchDependencies = {
   /** Test-only transport seam. Callers must opt in with allowTestTransport. */
@@ -27,6 +54,7 @@ export type RecipeFetchDependencies = {
   maxBytes?: number;
   maxRedirects?: number;
   timeoutMs?: number;
+  requestGate?: <T>(url: URL, operation: () => Promise<T>) => Promise<T>;
 };
 
 function ipv4Number(address: string): number {
@@ -99,13 +127,32 @@ function hostnameWithoutBrackets(url: URL): string {
 }
 
 function validateUrl(url: URL): void {
+  if (url.href.length > 2_048) {
+    throw new Error("Recipe URL exceeds the 2048 character limit");
+  }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error("Only HTTP and HTTPS recipe URLs are allowed");
+  }
+  if (url.username !== "" || url.password !== "") {
+    throw new Error("Recipe URL must not contain credentials");
   }
 
   const hostname = hostnameWithoutBrackets(url);
   if (isIP(hostname) && isBlockedAddress(hostname)) {
     throw new Error(`Recipe URL host is not publicly routable: ${url.hostname}`);
+  }
+}
+
+function validateSourceScope(url: URL, sourceScope: URL | undefined): void {
+  if (sourceScope === undefined) return;
+  const sourceHost = sourceScope.hostname.toLowerCase().replace(/^www\./u, "");
+  const candidateHost = url.hostname.toLowerCase().replace(/^www\./u, "");
+  if (
+    url.protocol !== sourceScope.protocol
+    || url.port !== sourceScope.port
+    || candidateHost !== sourceHost
+  ) {
+    throw new Error(`Resource URL is outside configured source host scope: ${url.href}`);
   }
 }
 
@@ -204,11 +251,60 @@ function requestPinnedAddress(
   });
 }
 
-async function readHtmlWithLimit(response: Response, maxBytes: number): Promise<string> {
+const DEFAULT_RESOURCE_LIMITS: PublicResourceLimits = {
+  robots: 256 * 1024,
+  sitemap: 2 * 1024 * 1024,
+  recipe: 2 * 1024 * 1024,
+  absolute: 4 * 1024 * 1024,
+};
+
+const RESOURCE_MEDIA_TYPES: Readonly<Record<PublicResourceKind, readonly string[]>> = {
+  robots: ["text/plain"],
+  sitemap: ["application/xml", "text/xml"],
+  recipe: ["text/html", "application/xhtml+xml"],
+};
+
+const CROSS_ORIGIN_REQUEST_HEADER_ALLOWLIST = new Set([
+  "accept",
+  "accept-language",
+  "user-agent",
+]);
+
+function crossOriginRequestHeaders(headers: HeadersInit | undefined): Headers {
+  const safeHeaders = new Headers();
+  for (const [name, value] of new Headers(headers)) {
+    if (CROSS_ORIGIN_REQUEST_HEADER_ALLOWLIST.has(name)) safeHeaders.set(name, value);
+  }
+  return safeHeaders;
+}
+
+function hasValidatedConditionalHeader(headers: HeadersInit | undefined): boolean {
+  const values = new Headers(headers);
+  const etag = values.get("if-none-match");
+  const modifiedSince = values.get("if-modified-since");
+  const validEtag = etag !== null
+    && etag.length <= 1_024
+    && /^(?:\*|(?:W\/)?"[\x21\x23-\x7e\x80-\xff]*"(?:\s*,\s*(?:W\/)?"[\x21\x23-\x7e\x80-\xff]*")*)$/u.test(etag);
+  const validModifiedSince = modifiedSince !== null
+    && modifiedSince.length <= 1_024
+    && !/[\r\n\0]/u.test(modifiedSince)
+    && !Number.isNaN(Date.parse(modifiedSince));
+  return validEtag || validModifiedSince;
+}
+
+function validateLimits(limits: PublicResourceLimits): void {
+  for (const [name, value] of Object.entries(limits)) {
+    if (!Number.isSafeInteger(value) || value <= 0 || value > 16 * 1024 * 1024) {
+      throw new Error(`Invalid ${name} resource byte limit`);
+    }
+  }
+}
+
+async function readBodyWithLimit(response: Response, maxBytes: number, label: string): Promise<string> {
   const contentLength = Number(response.headers.get("content-length"));
   if (Number.isFinite(contentLength) && contentLength > maxBytes) {
     await response.body?.cancel();
-    throw new Error(`Recipe response exceeds the ${maxBytes} byte limit`);
+    throw new Error(`${label} response exceeds the ${maxBytes} byte limit`);
   }
   if (!response.body) return "";
 
@@ -222,7 +318,7 @@ async function readHtmlWithLimit(response: Response, maxBytes: number): Promise<
     byteLength += value.byteLength;
     if (byteLength > maxBytes) {
       await reader.cancel();
-      throw new Error(`Recipe response exceeds the ${maxBytes} byte limit`);
+      throw new Error(`${label} response exceeds the ${maxBytes} byte limit`);
     }
     chunks.push(value);
   }
@@ -233,59 +329,114 @@ async function readHtmlWithLimit(response: Response, maxBytes: number): Promise<
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return new TextDecoder().decode(bytes);
+  return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+}
+
+export async function fetchPublicResource(
+  url: URL,
+  options: PublicResourceOptions,
+  dependencies: RecipeFetchDependencies = {},
+): Promise<FetchedPublicResource> {
+  if ((dependencies.requestImpl || dependencies.fetchImpl) && dependencies.allowTestTransport !== true) {
+    throw new Error("Custom recipe transports require allowTestTransport: true");
+  }
+
+  const requestImpl: PublicRequest = dependencies.requestImpl
+    ?? (dependencies.fetchImpl
+      ? (requestUrl, _address, init) => dependencies.fetchImpl!(requestUrl, init)
+      : requestPinnedAddress);
+  const resolveHostname = dependencies.resolveHostname ?? defaultResolveHostname;
+  const configuredLimits = options.limits ?? DEFAULT_RESOURCE_LIMITS;
+  validateLimits(configuredLimits);
+  const maxBytes = Math.min(configuredLimits[options.kind], configuredLimits.absolute);
+  const maxRedirects = dependencies.maxRedirects ?? 5;
+  const timeoutMs = dependencies.timeoutMs ?? 10_000;
+  const label = options.kind === "recipe" ? "Recipe" : options.kind === "robots" ? "Robots" : "Sitemap";
+  let currentUrl = new URL(url);
+  currentUrl.hash = "";
+  let requestHeaders = dependencies.requestInit?.headers;
+
+  for (let redirectCount = 0; redirectCount <= maxRedirects; redirectCount += 1) {
+    validateUrl(currentUrl);
+    validateSourceScope(currentUrl, options.sourceScope);
+    const validatedAddress = await resolveValidatedAddress(currentUrl, resolveHostname);
+    const executeRequest = () => requestImpl(currentUrl, validatedAddress, {
+      ...dependencies.requestInit,
+      ...(requestHeaders === undefined ? {} : { headers: requestHeaders }),
+      redirect: "manual",
+    }, timeoutMs);
+    const response = dependencies.requestGate === undefined
+      ? await executeRequest()
+      : await dependencies.requestGate(currentUrl, executeRequest);
+
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      const location = response.headers.get("location");
+      await response.body?.cancel();
+      if (!location) throw new Error(`${label} redirect is missing a Location header: ${currentUrl.href}`);
+      if (redirectCount === maxRedirects) {
+        throw new Error(`${label} request exceeded ${maxRedirects} redirects: ${url.href}`);
+      }
+      const redirectedUrl = new URL(location, currentUrl);
+      redirectedUrl.hash = "";
+      if (redirectedUrl.origin !== currentUrl.origin) {
+        requestHeaders = crossOriginRequestHeaders(requestHeaders);
+      }
+      currentUrl = redirectedUrl;
+      continue;
+    }
+
+    if (response.status === 304) {
+      await response.body?.cancel();
+      if (options.allowNotModified !== true || !hasValidatedConditionalHeader(requestHeaders)) {
+        throw new Error(`${label} response returned HTTP 304 without a validated conditional request: ${currentUrl.href}`);
+      }
+      return {
+        body: "",
+        url: currentUrl,
+        mediaType: null,
+        status: 304,
+        etag: response.headers.get("etag"),
+        lastModified: response.headers.get("last-modified"),
+      };
+    }
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error(`${label} request failed with HTTP ${response.status}: ${currentUrl.href}`);
+    }
+
+    const mediaType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() ?? null;
+    if (mediaType === null || !RESOURCE_MEDIA_TYPES[options.kind].includes(mediaType)) {
+      await response.body?.cancel();
+      throw new Error(`${label} response has unsupported Content-Type: ${mediaType ?? "missing"}`);
+    }
+
+    return {
+      body: await readBodyWithLimit(response, maxBytes, label),
+      url: currentUrl,
+      mediaType,
+      status: 200,
+      etag: response.headers.get("etag"),
+      lastModified: response.headers.get("last-modified"),
+    };
+  }
+
+  throw new Error(`${label} request exceeded ${maxRedirects} redirects: ${url.href}`);
 }
 
 export async function fetchRecipePage(
   url: URL,
   dependencies: RecipeFetchDependencies = {},
 ): Promise<FetchedRecipePage> {
-  if ((dependencies.requestImpl || dependencies.fetchImpl) && dependencies.allowTestTransport !== true) {
-    throw new Error("Custom recipe transports require allowTestTransport: true");
-  }
-
-  const requestImpl: RecipeRequest = dependencies.requestImpl
-    ?? (dependencies.fetchImpl
-      ? (requestUrl, _address, init) => dependencies.fetchImpl!(requestUrl, init)
-      : requestPinnedAddress);
-  const resolveHostname = dependencies.resolveHostname ?? defaultResolveHostname;
-  const maxBytes = dependencies.maxBytes ?? 2 * 1024 * 1024;
-  const maxRedirects = dependencies.maxRedirects ?? 5;
-  const timeoutMs = dependencies.timeoutMs ?? 10_000;
-  let currentUrl = new URL(url);
-
-  for (let redirectCount = 0; redirectCount <= maxRedirects; redirectCount += 1) {
-    validateUrl(currentUrl);
-    const validatedAddress = await resolveValidatedAddress(currentUrl, resolveHostname);
-    const response = await requestImpl(currentUrl, validatedAddress, {
-      ...dependencies.requestInit,
-      redirect: "manual",
-    }, timeoutMs);
-
-    if ([301, 302, 303, 307, 308].includes(response.status)) {
-      const location = response.headers.get("location");
-      await response.body?.cancel();
-      if (!location) throw new Error(`Recipe redirect is missing a Location header: ${currentUrl.href}`);
-      if (redirectCount === maxRedirects) {
-        throw new Error(`Recipe request exceeded ${maxRedirects} redirects: ${url.href}`);
-      }
-      currentUrl = new URL(location, currentUrl);
-      continue;
-    }
-
-    if (!response.ok) {
-      await response.body?.cancel();
-      throw new Error(`Recipe request failed with HTTP ${response.status}: ${currentUrl.href}`);
-    }
-
-    const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
-    if (contentType !== "text/html" && contentType !== "application/xhtml+xml") {
-      await response.body?.cancel();
-      throw new Error(`Recipe response has unsupported Content-Type: ${contentType ?? "missing"}`);
-    }
-
-    return { html: await readHtmlWithLimit(response, maxBytes), url: currentUrl };
-  }
-
-  throw new Error(`Recipe request exceeded ${maxRedirects} redirects: ${url.href}`);
+  const limits = dependencies.maxBytes === undefined
+    ? undefined
+    : {
+      ...DEFAULT_RESOURCE_LIMITS,
+      recipe: dependencies.maxBytes,
+      absolute: dependencies.maxBytes,
+    };
+  const result = await fetchPublicResource(url, {
+    kind: "recipe",
+    ...(limits === undefined ? {} : { limits }),
+  }, dependencies);
+  return { html: result.body, url: result.url };
 }

@@ -27,6 +27,7 @@ describe("openDatabase", () => {
     expect(database.query("SELECT version, name FROM schema_migrations").all()).toEqual([
       { version: 1, name: "initial configuration" },
       { version: 2, name: "recipe ingestion persistence" },
+      { version: 3, name: "bounded HTTP cache" },
     ]);
     expect(database.query(`
       SELECT name
@@ -37,6 +38,7 @@ describe("openDatabase", () => {
       { name: "day_profiles" },
       { name: "household_members" },
       { name: "household_rules" },
+      { name: "http_cache" },
       { name: "pantry_items" },
       { name: "preferred_stores" },
       { name: "recipe_ingredients" },
@@ -75,6 +77,19 @@ describe("openDatabase", () => {
     }
   });
 
+  test("rejects a version-three database missing its HTTP cache table without mutation", async () => {
+    const path = await temporaryDatabasePath();
+    const database = openDatabase(path);
+    database.exec("DROP TABLE http_cache");
+    database.close();
+    const before = await readFile(path);
+
+    expect(() => openExistingDatabase(path)).toThrow(
+      "Family configuration does not exist. Run mealplan setup first.",
+    );
+    expect(await readFile(path)).toEqual(before);
+  });
+
   test("upgrades a legitimate version-one database through openExistingDatabase", async () => {
     const path = await temporaryDatabasePath();
     const versionOne = new Database(path, { create: true, strict: true });
@@ -86,6 +101,7 @@ describe("openDatabase", () => {
     expect(upgraded.query("SELECT version, name FROM schema_migrations ORDER BY version").all()).toEqual([
       { version: 1, name: "initial configuration" },
       { version: 2, name: "recipe ingestion persistence" },
+      { version: 3, name: "bounded HTTP cache" },
     ]);
     expect(upgraded.query(`
       SELECT name FROM sqlite_master
@@ -611,16 +627,16 @@ describe("openDatabase", () => {
     const database = openDatabase(await temporaryDatabasePath());
     const knownHistory: readonly Migration[] = [
       ...migrations,
-      { version: 3, name: "third migration", up() {} },
       { version: 4, name: "fourth migration", up() {} },
+      { version: 5, name: "fifth migration", up() {} },
     ];
     database.query(`
       INSERT INTO schema_migrations (version, name, applied_at)
       VALUES (?, ?, ?)
-    `).run(4, "fourth migration", new Date().toISOString());
+    `).run(5, "fifth migration", new Date().toISOString());
 
     expect(() => runMigrations(database, knownHistory)).toThrow(
-      "Migration ledger is not a known ordered prefix: expected 3 (third migration), found 4 (fourth migration)",
+      "Migration ledger is not a known ordered prefix: expected 4 (fourth migration), found 5 (fifth migration)",
     );
 
     database.close();
@@ -655,7 +671,7 @@ describe("openDatabase", () => {
   test("persists a successful subsequent migration across close and reopen", async () => {
     const path = await temporaryDatabasePath();
     const subsequentMigration: Migration = {
-      version: 3,
+      version: 4,
       name: "subsequent migration",
       up(database) {
         database.exec("CREATE TABLE subsequent_migration_probe (id TEXT PRIMARY KEY) STRICT");
@@ -673,7 +689,8 @@ describe("openDatabase", () => {
       .toEqual([
         { version: 1, name: "initial configuration" },
         { version: 2, name: "recipe ingestion persistence" },
-        { version: 3, name: "subsequent migration" },
+        { version: 3, name: "bounded HTTP cache" },
+        { version: 4, name: "subsequent migration" },
       ]);
     expect(reopenedDatabase.query(`
       SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'subsequent_migration_probe'
@@ -713,6 +730,7 @@ describe("openDatabase", () => {
     expect(reopenedDatabase.query("SELECT version, name FROM schema_migrations").all()).toEqual([
       { version: 1, name: "initial configuration" },
       { version: 2, name: "recipe ingestion persistence" },
+      { version: 3, name: "bounded HTTP cache" },
     ]);
     reopenedDatabase.close();
   });
@@ -721,14 +739,14 @@ describe("openDatabase", () => {
     const path = await temporaryDatabasePath();
     const database = openDatabase(path);
     const successfulMigration: Migration = {
-      version: 3,
+      version: 4,
       name: "successful before failure",
       up(migrationDatabase) {
         migrationDatabase.exec("CREATE TABLE committed_before_failure (id TEXT PRIMARY KEY) STRICT");
       },
     };
     const failingMigration: Migration = {
-      version: 4,
+      version: 5,
       name: "deliberate failure",
       up(migrationDatabase) {
         migrationDatabase.exec("CREATE TABLE should_be_rolled_back (id TEXT PRIMARY KEY) STRICT");
@@ -747,11 +765,11 @@ describe("openDatabase", () => {
     ])).toThrow("deliberate migration failure");
     expect(database.query("SELECT name FROM sqlite_master WHERE name = 'committed_before_failure'").get())
       .toEqual({ name: "committed_before_failure" });
-    expect(database.query("SELECT version FROM schema_migrations WHERE version = 3").get())
-      .toEqual({ version: 3 });
+    expect(database.query("SELECT version FROM schema_migrations WHERE version = 4").get())
+      .toEqual({ version: 4 });
     expect(database.query("SELECT name FROM sqlite_master WHERE name = 'should_be_rolled_back'").get()).toBeNull();
     expect(database.query("SELECT id FROM household_members WHERE id = 'rolled-back'").get()).toBeNull();
-    expect(database.query("SELECT version FROM schema_migrations WHERE version = 4").get()).toBeNull();
+    expect(database.query("SELECT version FROM schema_migrations WHERE version = 5").get()).toBeNull();
 
     database.close();
 

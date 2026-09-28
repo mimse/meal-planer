@@ -12,6 +12,7 @@ import { runPantryAddWorkflow, runPantryRemoveWorkflow } from "./commands/pantry
 import { readPantry } from "./commands/pantry";
 import { runSetupWorkflow } from "./commands/setup-workflow";
 import type { SetupAnswers } from "./commands/setup";
+import { runSourceTest } from "./application/test-source";
 import {
   addRecipeSource,
   createRecipeSource,
@@ -222,7 +223,7 @@ sources.command("list")
   });
 
 sources.command("add")
-  .description("Add recipe-source configuration (probing and sync remain Phase 2)")
+  .description("Add recipe-source configuration")
   .argument("<base-url>", "HTTP(S) source base URL")
   .option("--id <id>", "stable source id")
   .option("--name <name>", "display name")
@@ -232,7 +233,31 @@ sources.command("add")
     const database = openExistingDatabase(databasePath());
     try {
       addRecipeSource(database, source);
-      console.log(`Recipe source added: ${source.id}. Probe and sync are not available until Phase 2.`);
+      console.log(`Recipe source added: ${source.id}. Run sources test ${source.id} to probe discovery.`);
+    } finally {
+      database.close();
+    }
+  });
+
+sources.command("test")
+  .description("Probe bounded sitemap discovery only; recipe extraction is not tested")
+  .argument("<source-id>", "stable source id")
+  .option("--json", "emit stable JSON")
+  .action(async (sourceId: string, options: { json?: boolean }) => {
+    const id = validateRecipeSourceId(sourceId);
+    const database = openExistingDatabase(databasePath());
+    try {
+      const report = await runSourceTest(database, id);
+      if (options.json) {
+        process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+      } else {
+        console.log(`Source ${report.sourceId}: discovered ${report.count} recipe URL${report.count === 1 ? "" : "s"}${report.capped ? " (capped)" : ""}.`);
+        console.log(`Discovery routes: ${report.discoveryRoutes.join(" -> ")}`);
+        for (const recipeUrl of report.sampleRecipeUrls) console.log(`- ${recipeUrl}`);
+        console.log(`Cache: ${report.cache.misses} miss, ${report.cache.refreshed} refreshed, ${report.cache.revalidated} revalidated.`);
+        for (const warning of report.warnings) console.log(`Warning: ${warning}`);
+        console.log("Discovery only; recipe extraction remains a later Phase 2 increment.");
+      }
     } finally {
       database.close();
     }

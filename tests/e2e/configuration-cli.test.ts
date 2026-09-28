@@ -184,6 +184,40 @@ describe("setup and family CLI", () => {
     expect(listed.some((source: { id: string }) => source.id === "mummum")).toBe(false);
   });
 
+  test("source test requires an existing enabled configured source", async () => {
+    const root = await mkdtemp(join(tmpdir(), "meal-planer-cli-configuration-"));
+    temporaryDirectories.push(root);
+    const databasePath = join(root, "family.sqlite");
+
+    const missingDatabase = await runCli([
+      "--database", databasePath, "sources", "test", "mummum", "--json",
+    ]);
+    expect(missingDatabase.exitCode).not.toBe(0);
+    expect(missingDatabase.stderr).toContain("Run mealplan setup first");
+    expect(await exists(databasePath)).toBe(false);
+
+    expect((await runCli([
+      "--database", databasePath, "setup",
+      "--member", JSON.stringify({ id: "alex", name: "Alex", kind: "adult", servings: 1 }),
+    ])).exitCode).toBe(0);
+
+    const missingSource = await runCli([
+      "--database", databasePath, "sources", "test", "missing", "--json",
+    ]);
+    expect(missingSource.exitCode).not.toBe(0);
+    expect(missingSource.stderr).toContain("Recipe source does not exist: missing");
+
+    expect((await runCli([
+      "--database", databasePath, "sources", "disable", "mummum",
+    ])).exitCode).toBe(0);
+
+    const disabled = await runCli([
+      "--database", databasePath, "sources", "test", "mummum", "--json",
+    ]);
+    expect(disabled.exitCode).not.toBe(0);
+    expect(disabled.stderr).toContain("Recipe source is disabled: mummum");
+  });
+
   test("source validation and identity conflicts leave configuration unchanged", async () => {
     const root = await mkdtemp(join(tmpdir(), "meal-planer-cli-configuration-"));
     temporaryDirectories.push(root);

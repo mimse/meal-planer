@@ -149,6 +149,28 @@ export const migrations: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 3,
+    name: "bounded HTTP cache",
+    up(database) {
+      database.exec(`
+        CREATE TABLE http_cache (
+          url TEXT PRIMARY KEY CHECK (length(url) BETWEEN 1 AND 2048),
+          final_url TEXT NOT NULL CHECK (length(final_url) BETWEEN 1 AND 2048),
+          media_type TEXT NOT NULL CHECK (media_type IN (
+            'text/plain', 'application/xml', 'text/xml', 'text/html', 'application/xhtml+xml'
+          )),
+          body TEXT NOT NULL CHECK (length(CAST(body AS BLOB)) <= 2097152),
+          fetched_at TEXT NOT NULL CHECK (length(fetched_at) BETWEEN 20 AND 30),
+          etag TEXT CHECK (etag IS NULL OR length(etag) BETWEEN 1 AND 1024),
+          last_modified TEXT CHECK (last_modified IS NULL OR length(last_modified) BETWEEN 1 AND 1024),
+          access_sequence INTEGER NOT NULL CHECK (access_sequence >= 0)
+        ) STRICT;
+
+        CREATE INDEX http_cache_lru ON http_cache(access_sequence, url);
+      `);
+    },
+  },
 ];
 
 function validateMigrations(pendingMigrations: readonly Migration[]): void {

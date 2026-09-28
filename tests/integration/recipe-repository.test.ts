@@ -123,6 +123,7 @@ describe("recipe persistence", () => {
     expect(database.query("SELECT version, name FROM schema_migrations ORDER BY version").all()).toEqual([
       { version: 1, name: "initial configuration" },
       { version: 2, name: "recipe ingestion persistence" },
+      { version: 3, name: "bounded HTTP cache" },
     ]);
     expect(database.query(`
       SELECT name
@@ -153,11 +154,12 @@ describe("recipe persistence", () => {
     expect(upgraded.query("SELECT version, name FROM schema_migrations ORDER BY version").all()).toEqual([
       { version: 1, name: "initial configuration" },
       { version: 2, name: "recipe ingestion persistence" },
+      { version: 3, name: "bounded HTTP cache" },
     ]);
     upgraded.close();
 
     const reopened = openDatabase(path);
-    expect(reopened.query("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 2 });
+    expect(reopened.query("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 3 });
     reopened.close();
   });
 

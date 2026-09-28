@@ -2,7 +2,7 @@
 
 A local, family-aware meal-planning CLI for Denmark, built with TypeScript and Bun.
 
-The Phase 0 integration-evidence milestone and Phase 1 local setup are complete. The first Phase 2 increment adds durable, validated recipe-ingestion persistence with deterministic deduplication and preserved source evidence. Recipe probing/synchronization, source adapters beyond the existing inspection path, recipe CLI commands, and meal planning remain later work.
+The Phase 0 integration-evidence milestone and Phase 1 local setup are complete. Phase 2 now includes durable recipe-ingestion persistence plus SSRF-safe, bounded sitemap discovery with a conditional SQLite HTTP cache and per-host rate limiting. Recipe extraction during source probing, synchronization/import, production microdata/Inertia adapters, recipe search/import commands, and meal planning remain later work.
 
 ## Development
 
@@ -29,6 +29,7 @@ bun run src/cli.ts pantry add [--item <json> ...]
 bun run src/cli.ts pantry remove [name ...]
 bun run src/cli.ts sources list [--json]
 bun run src/cli.ts sources add <base-url> [--id <id>] [--name <name>] [--adapter <adapter>]
+bun run src/cli.ts sources test <source-id> [--json]
 bun run src/cli.ts sources enable|disable|remove <source-id>
 bun run src/cli.ts recipes inspect <recipe-url> --json
 bun run src/cli.ts integrations verify-deals --json
@@ -63,7 +64,7 @@ Use `--update-rule '{"id":"<existing-id>","memberId":null,"kind":"dietary_restri
 
 `pantry add` and `pantry remove` prompt when mutation arguments are omitted. Pantry names use Unicode- and whitespace-normalized identity while display names and quantity text are retained. Multi-item additions and removals are atomic, and removing any unknown name fails without deleting known items.
 
-Recipe-source IDs are stable identifiers; omit `--id` to derive one from the URL. Supported configuration adapters are `auto`, `jsonld`, `microdata`, and `spisbedre-inertia`. Duplicate IDs and canonical base URLs are rejected. A source with imported recipes may be disabled, but removal is blocked so recipe provenance remains valid. Source addition still saves configuration only: it does not probe, fetch, extract, or synchronize recipes. `sources test` and `sources sync` remain Phase 2 work and are intentionally absent rather than reporting a fabricated compatibility result. Store dealer IDs are likewise deliberately left unresolved until deal-provider integration; setup makes no live MCP calls.
+Recipe-source IDs are stable identifiers; omit `--id` to derive one from the URL. Supported configuration adapters are `auto`, `jsonld`, `microdata`, and `spisbedre-inertia`. Duplicate IDs and canonical base URLs are rejected. A source with imported recipes may be disabled, but removal is blocked so recipe provenance remains valid. Source addition still saves configuration only. `sources test` requires an existing enabled source and probes only bounded robots/sitemap discovery; it does not extract or persist recipes or change source configuration. Discovery uses the hardened public-network transport, host-scoped redirects, per-host request spacing, and a bounded conditional SQLite cache. `sources sync` and extraction during probing remain later Phase 2 work. Store dealer IDs are likewise deliberately left unresolved until deal-provider integration; setup makes no live MCP calls.
 
 The database path is resolved in this order:
 

@@ -1,8 +1,173 @@
 import { describe, expect, test } from "bun:test";
 import {
   createPinnedLookup,
+  fetchPublicResource,
   fetchRecipePage,
 } from "../../src/adapters/recipes/fetch";
+
+describe("fetchPublicResource", () => {
+  test("accepts allowlisted robots text with its own byte limit", async () => {
+    const result = await fetchPublicResource(new URL("https://recipes.example/robots.txt"), {
+      kind: "robots",
+      limits: { robots: 64, sitemap: 128, recipe: 256, absolute: 512 },
+    }, {
+      resolveHostname: async () => ["93.184.216.34"],
+      allowTestTransport: true,
+      fetchImpl: async () => new Response("Sitemap: /sitemap.xml\n", {
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      }),
+    });
+
+    expect(result).toMatchObject({
+      body: "Sitemap: /sitemap.xml\n",
+      mediaType: "text/plain",
+      url: new URL("https://recipes.example/robots.txt"),
+    });
+  });
+
+  test("enforces robots and sitemap byte limits and cancels oversized streams", async () => {
+    for (const kind of ["robots", "sitemap"] as const) {
+      let cancelled = false;
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          controller.enqueue(new TextEncoder().encode("123456"));
+        },
+        cancel() { cancelled = true; },
+      });
+      await expect(fetchPublicResource(new URL(`https://recipes.example/${kind}`), {
+        kind,
+        limits: { robots: 5, sitemap: 5, recipe: 5, absolute: 5 },
+      }, {
+        resolveHostname: async () => ["93.184.216.34"],
+        allowTestTransport: true,
+        fetchImpl: async () => new Response(body, {
+          headers: { "content-type": kind === "robots" ? "text/plain" : "application/xml" },
+        }),
+      })).rejects.toThrow("exceeds the 5 byte limit");
+      expect(cancelled).toBe(true);
+    }
+  });
+
+  test("rejects cross-host sitemap redirects before sending the redirected request", async () => {
+    const requests: string[] = [];
+    await expect(fetchPublicResource(new URL("https://recipes.example/sitemap.xml"), {
+      kind: "sitemap",
+      sourceScope: new URL("https://recipes.example/"),
+    }, {
+      resolveHostname: async () => ["93.184.216.34"],
+      allowTestTransport: true,
+      fetchImpl: async (url) => {
+        requests.push(url.href);
+        return new Response(null, {
+          status: 302,
+          headers: { location: "https://other.example/sitemap.xml" },
+        });
+      },
+    })).rejects.toThrow("outside configured source host scope");
+    expect(requests).toEqual(["https://recipes.example/sitemap.xml"]);
+  });
+
+  test("applies the request gate to every redirect hop", async () => {
+    const gated: string[] = [];
+    const requested: string[] = [];
+    await fetchPublicResource(new URL("https://recipes.example/start"), {
+      kind: "sitemap",
+      sourceScope: new URL("https://recipes.example/"),
+    }, {
+      resolveHostname: async () => ["93.184.216.34"],
+      allowTestTransport: true,
+      requestGate: async (url, operation) => {
+        gated.push(url.href);
+        return operation();
+      },
+      fetchImpl: async (url) => {
+        requested.push(url.href);
+        if (url.pathname === "/start") {
+          return new Response(null, { status: 302, headers: { location: "/sitemap.xml" } });
+        }
+        return new Response("<urlset></urlset>", { headers: { "content-type": "application/xml" } });
+      },
+    });
+
+    expect(gated).toEqual(requested);
+    expect(gated).toHaveLength(2);
+  });
+
+  test("keeps only safe allowlisted headers on a cross-origin recipe redirect", async () => {
+    const requests: Array<{ url: string; headers: Record<string, string> }> = [];
+
+    const result = await fetchPublicResource(new URL("https://recipes.example/start"), {
+      kind: "recipe",
+    }, {
+      requestInit: {
+        headers: {
+          accept: "text/html",
+          "accept-language": "da-DK",
+          authorization: "Bearer origin-secret",
+          cookie: "session=origin-secret",
+          "if-match": "\"origin-version\"",
+          "if-range": "\"origin-range\"",
+          "proxy-authorization": "Basic proxy-secret",
+          referer: "https://recipes.example/start?token=origin-secret",
+          "user-agent": "meal-planer/test",
+          "x-api-key": "origin-api-key",
+          "x-client-secret": "arbitrary-origin-secret",
+        },
+      },
+      resolveHostname: async () => ["93.184.216.34"],
+      allowTestTransport: true,
+      fetchImpl: async (url, init) => {
+        requests.push({ url: url.href, headers: Object.fromEntries(new Headers(init.headers).entries()) });
+        if (url.hostname === "recipes.example") {
+          return new Response(null, {
+            status: 302,
+            headers: { location: "https://cdn.example/recipe" },
+          });
+        }
+        return new Response("<html></html>", { headers: { "content-type": "text/html" } });
+      },
+    });
+
+    expect(result.url.href).toBe("https://cdn.example/recipe");
+    expect(requests).toEqual([
+      {
+        url: "https://recipes.example/start",
+        headers: {
+          accept: "text/html",
+          "accept-language": "da-DK",
+          authorization: "Bearer origin-secret",
+          cookie: "session=origin-secret",
+          "if-match": "\"origin-version\"",
+          "if-range": "\"origin-range\"",
+          "proxy-authorization": "Basic proxy-secret",
+          referer: "https://recipes.example/start?token=origin-secret",
+          "user-agent": "meal-planer/test",
+          "x-api-key": "origin-api-key",
+          "x-client-secret": "arbitrary-origin-secret",
+        },
+      },
+      {
+        url: "https://cdn.example/recipe",
+        headers: {
+          accept: "text/html",
+          "accept-language": "da-DK",
+          "user-agent": "meal-planer/test",
+        },
+      },
+    ]);
+  });
+
+  test("rejects HTTP 304 when no validated conditional header was sent", async () => {
+    await expect(fetchPublicResource(new URL("https://recipes.example/sitemap.xml"), {
+      kind: "sitemap",
+      allowNotModified: true,
+    }, {
+      resolveHostname: async () => ["93.184.216.34"],
+      allowTestTransport: true,
+      fetchImpl: async () => new Response(null, { status: 304 }),
+    })).rejects.toThrow("without a validated conditional request");
+  });
+});
 
 describe("fetchRecipePage", () => {
   test("pinned lookup supports all-address mode without another DNS query", async () => {

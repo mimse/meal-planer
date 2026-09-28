@@ -371,6 +371,8 @@ Exit criterion: configuration survives process restarts and can be edited non-in
 
 ### Phase 2 — recipe ingestion
 
+**Current scope:** The safe discovery increment is complete: the shared public HTTP(S) transport preserves DNS pinning and redirect revalidation, source probing is host-scoped and bounded, requests are rate-limited per host, and validated responses use a bounded conditional SQLite cache. `sources test` reports discovery evidence only. Recipe extraction during probing, synchronization/import, production microdata/Inertia adapters, and recipe search/import commands remain future Phase 2 increments.
+
 - Build HTTP safety, caching, rate limiting, and the generic JSON-LD adapter.
 - Add source registry and source-management commands.
 - Add custom adapters only where Phase 0 proves necessary.
