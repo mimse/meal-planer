@@ -23,7 +23,7 @@ mealplan backup create /safe/path/mealplan-backup \
   --mcp-data "$HOME/.tilbudstrolden.json"
 ```
 
-The destination must not already exist. Creation writes a private staged directory, snapshots live SQLite state coherently with `VACUUM INTO`, runs SQLite integrity and foreign-key checks, records the migration ledger, validates optional MCP data against the pinned 0.5.3 schema, computes SHA-256 checksums, and then publishes the bundle by rename.
+The destination must not already exist. Creation writes a private staged directory, snapshots live SQLite state coherently with `VACUUM INTO`, runs SQLite integrity and foreign-key checks, compares the complete schema including the migration tracking table against the recorded migrations, verifies that a copy can safely advance, validates optional MCP data against the pinned 0.5.3 schema, and computes SHA-256 checksums. Publication uses Linux `renameat2(RENAME_NOREPLACE)` anchored to an open parent-directory descriptor, checks that the published directory is the staged inode, and detects parent redirection. A concurrent destination is never replaced. See the private-parent requirement and race limits below.
 
 Bundle contents are fixed:
 
@@ -72,10 +72,15 @@ Before publishing output, restore rejects:
 - corrupt SQLite pages or foreign keys;
 - invalid or inconsistent migration ledgers;
 - malformed or out-of-contract MCP JSON;
+- restore destinations inside the bundle, including symlink aliases;
 - an existing restore destination.
 
-A failed restore removes its staging directory and does not publish partial recovered state.
+A failed restore removes files through its anchored staging descriptor and never recursively deletes a redirected destination. The fully validated directory becomes visible atomically, so readers cannot observe a partially published restore.
 
 ## Limits
+
+Hardened backup/restore is supported on Linux with glibc and `/proc` mounted. Use a private destination parent directory that other users cannot modify. Publication checks the staged directory's filesystem identity before and after its no-replace rename, and restore checks the current locations of the opened source and destination directories. A process with permission to mutate those directories can still move entries during or after these checks; no pathname-based API can guarantee their continued location against such an actor.
+
+Failed operations clear their own staged files through the open directory descriptor but intentionally leave an empty staging directory (or an empty published directory if publication was rejected afterward). Removing a directory by a mutable parent/name pair could delete a concurrent replacement. Inspect these empty directories and remove them manually from a private parent when safe.
 
 The SQLite snapshot and an optional independently operated MCP JSON file cannot be captured in one cross-file transaction. Their capture time is recorded, but the bundle does not claim they are one point-in-time distributed snapshot.

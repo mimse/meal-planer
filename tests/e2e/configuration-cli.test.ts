@@ -177,7 +177,9 @@ describe("setup and family CLI", () => {
     ])).stdout);
     expect(listed.find((source: { id: string }) => source.id === "mummum").enabled).toBe(true);
 
-    expect((await runCli(["--database", databasePath, "sources", "remove", "mummum"])).exitCode).toBe(0);
+    const removed = await runCli(["--database", databasePath, "sources", "remove", "mummum"]);
+    expect(removed.exitCode, removed.stderr).toBe(0);
+    expect(removed.stdout).toContain("Recipe source removed: mummum.");
     listed = JSON.parse((await runCli([
       "--database", databasePath, "sources", "list", "--json",
     ])).stdout);

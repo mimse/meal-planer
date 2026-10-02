@@ -29,7 +29,7 @@ mealplan plan show --week next
 mealplan plan accept --week next
 ```
 
-`next` means the following Monday–Sunday week in the Copenhagen calendar. The shopping date is the preceding Saturday. Plan creation saves a draft; shopping always uses the accepted plan.
+`next` means the following Monday–Sunday week in the Copenhagen calendar. On both Friday and Saturday, the default cycle targets the immediately following Monday and uses that Saturday as the shopping date. The shopping date is always the Saturday preceding the planned Monday. Plan creation saves a draft; shopping always uses the accepted plan.
 
 Use `--no-deals` for deterministic offline planning. Provider failure also falls back to local planning with a warning and never relaxes household or day constraints.
 

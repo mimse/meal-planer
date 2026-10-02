@@ -135,6 +135,7 @@ const recipeSourceRowSchema = z.object({
   baseUrl: z.string(),
   adapter: z.string(),
   enabled: sqliteBooleanSchema,
+  archived: sqliteBooleanSchema,
 }).strict();
 
 const dayProfileRowSchema = z.object({
@@ -339,7 +340,15 @@ class DayProfileRepository {
 
 function toRecipeSource(rawRow: unknown): RecipeSource {
   const row = recipeSourceRowSchema.parse(rawRow);
-  return recipeSourceOutputSchema.parse({ ...row, enabled: row.enabled === 1 });
+  const { archived: _archived, ...source } = row;
+  return recipeSourceOutputSchema.parse({ ...source, enabled: row.enabled === 1 });
+}
+
+type StoredRecipeSource = RecipeSource & { readonly archived: boolean };
+
+function toStoredRecipeSource(rawRow: unknown): StoredRecipeSource {
+  const row = recipeSourceRowSchema.parse(rawRow);
+  return { ...toRecipeSource(row), archived: row.archived === 1 };
 }
 
 class RecipeSourceRepository {
@@ -348,32 +357,56 @@ class RecipeSourceRepository {
   upsert(input: RecipeSource): RecipeSource {
     const source = recipeSourceSchema.parse(input);
     this.database.query(`
-      INSERT INTO recipe_sources (id, name, base_url, adapter, enabled)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO recipe_sources (id, name, base_url, adapter, enabled, archived)
+      VALUES (?, ?, ?, ?, ?, 0)
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
         base_url = excluded.base_url,
         adapter = excluded.adapter,
-        enabled = excluded.enabled
+        enabled = excluded.enabled,
+        archived = 0
     `).run(source.id, source.name, source.baseUrl, source.adapter, source.enabled ? 1 : 0);
     return source;
   }
 
   get(id: string): RecipeSource | null {
     const row = this.database.query<Record<string, unknown>, [string]>(`
-      SELECT id, name, base_url AS baseUrl, adapter, enabled
+      SELECT id, name, base_url AS baseUrl, adapter, enabled, archived
       FROM recipe_sources
-      WHERE id = ?
+      WHERE id = ? AND archived = 0
     `).get(identifierSchema.parse(id));
     return row === null ? null : toRecipeSource(row);
   }
 
+  getIncludingArchived(id: string): StoredRecipeSource | null {
+    const row = this.database.query<Record<string, unknown>, [string]>(`
+      SELECT id, name, base_url AS baseUrl, adapter, enabled, archived
+      FROM recipe_sources
+      WHERE id = ?
+    `).get(identifierSchema.parse(id));
+    return row === null ? null : toStoredRecipeSource(row);
+  }
+
   list(): RecipeSource[] {
     return this.database.query<Record<string, unknown>, []>(`
-      SELECT id, name, base_url AS baseUrl, adapter, enabled
+      SELECT id, name, base_url AS baseUrl, adapter, enabled, archived
       FROM recipe_sources
+      WHERE archived = 0
       ORDER BY id
     `).all().map(toRecipeSource);
+  }
+
+  listIncludingArchived(): StoredRecipeSource[] {
+    return this.database.query<Record<string, unknown>, []>(`
+      SELECT id, name, base_url AS baseUrl, adapter, enabled, archived
+      FROM recipe_sources
+      ORDER BY id
+    `).all().map(toStoredRecipeSource);
+  }
+
+  archive(id: string): boolean {
+    return this.database.query("UPDATE recipe_sources SET enabled = 0, archived = 1 WHERE id = ? AND archived = 0")
+      .run(identifierSchema.parse(id)).changes === 1;
   }
 
   remove(id: string): boolean {

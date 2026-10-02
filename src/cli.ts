@@ -49,6 +49,13 @@ import { ClackPromptAdapter } from "./presentation/prompts";
 import { registerPlanEditCommands } from "./presentation/plan-edit-commands";
 import { registerShoppingListCommand } from "./presentation/shopping-list-command";
 
+export type CliDependencies = {
+  readonly runSourceTest?: typeof runSourceTest;
+  readonly runSourceSync?: typeof runSourceSync;
+};
+
+let cliDependencies: CliDependencies = {};
+
 const program = new Command()
   .name("mealplan")
   .description("Family-aware weekly meal planning for Denmark")
@@ -330,7 +337,7 @@ sources.command("test")
     const id = validateRecipeSourceId(sourceId);
     const database = openExistingDatabase(databasePath());
     try {
-      const report = await runSourceTest(database, id);
+      const report = await (cliDependencies.runSourceTest ?? runSourceTest)(database, id);
       if (options.json) {
         process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
       } else {
@@ -356,7 +363,7 @@ sources.command("sync")
     const parsedSourceId = sourceId === undefined ? undefined : validateRecipeSourceId(sourceId);
     const database = openExistingDatabase(databasePath());
     try {
-      const report = await runSourceSync(database, {
+      const report = await (cliDependencies.runSourceSync ?? runSourceSync)(database, {
         ...(parsedSourceId === undefined ? {} : { sourceId: parsedSourceId }),
         limit,
       });
@@ -394,14 +401,14 @@ for (const enabled of [true, false] as const) {
 }
 
 sources.command("remove")
-  .description("Remove recipe-source configuration")
+  .description("Remove an unused recipe source or archive one with imported provenance")
   .argument("<source-id>", "stable source id")
   .action((sourceId: string) => {
     const id = validateRecipeSourceId(sourceId);
     const database = openExistingDatabase(databasePath());
     try {
-      removeRecipeSource(database, id);
-      console.log(`Recipe source removed: ${id}.`);
+      const result = removeRecipeSource(database, id);
+      console.log(`Recipe source ${result}: ${id}.`);
     } finally {
       database.close();
     }
@@ -848,4 +855,12 @@ integrations
     if (!result.compatible) process.exitCode = 1;
   });
 
-await program.parseAsync();
+export async function runCli(
+  argv: readonly string[] = process.argv,
+  dependencies: CliDependencies = {},
+): Promise<void> {
+  cliDependencies = dependencies;
+  await program.parseAsync([...argv]);
+}
+
+if (import.meta.main) await runCli();

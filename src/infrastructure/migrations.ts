@@ -268,6 +268,17 @@ export const migrations: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 6,
+    name: "recipe source archival",
+    up(database) {
+      database.exec(`
+        ALTER TABLE recipe_sources
+          ADD COLUMN archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1));
+        CREATE INDEX recipe_sources_archived ON recipe_sources(archived, id);
+      `);
+    },
+  },
 ];
 
 function validateMigrations(pendingMigrations: readonly Migration[]): void {

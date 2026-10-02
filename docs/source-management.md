@@ -52,7 +52,7 @@ mealplan recipes review <recipe-id> [review options] --mark-reviewed
 
 A refresh updates source-owned evidence and preserves only explicit review overrides. Never mark a recipe reviewed unless servings, ingredient evidence, at least one duration, and dietary classification are complete.
 
-## Enable, disable, and remove
+## Enable, disable, archive, and remove
 
 ```sh
 mealplan sources disable example-recipes
@@ -60,7 +60,18 @@ mealplan sources enable example-recipes
 mealplan sources remove example-recipes
 ```
 
-Disabling a source prevents new planning candidates without deleting imported recipes or provenance. Removal is blocked while imported recipes reference the source.
+Disabling a source prevents new planning candidates without deleting imported recipes or provenance. `sources remove` permanently deletes a source that has never imported a recipe. When imported recipes still reference it, the command archives the source instead: it is disabled and omitted from source listing, synchronization, and planning while every imported recipe and its provenance remain readable with `recipes show`.
+
+The command reports either `removed` or `archived`. To reactivate an archived source, add it again with the same stable ID and original base URL:
+
+```sh
+mealplan sources add https://recipes.example/ \
+  --id example-recipes \
+  --name "Example Recipes" \
+  --adapter jsonld
+```
+
+Reusing an archived ID with a different base URL is refused because it would rebind existing recipe provenance. Use a new source ID for a different site or base path.
 
 ## Safety boundaries
 

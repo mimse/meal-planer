@@ -69,10 +69,14 @@ export function addRecipeSource(database: Database, input: RecipeSource): Recipe
   });
   const sources = createConfigurationRepositories(database).recipeSources;
   return database.transaction(() => {
-    if (sources.get(source.id) !== null) {
+    const existing = sources.getIncludingArchived(source.id);
+    if (existing !== null && !existing.archived) {
       throw new Error(`Recipe source id already exists: ${source.id}`);
     }
-    const conflictingUrl = sources.list().find(({ baseUrl }) => baseUrl === source.baseUrl);
+    if (existing?.archived === true && existing.baseUrl !== source.baseUrl) {
+      throw new Error(`Archived recipe source ${source.id} can only be re-added with its original URL: ${existing.baseUrl}`);
+    }
+    const conflictingUrl = sources.listIncludingArchived().find(({ id, baseUrl }) => id !== source.id && baseUrl === source.baseUrl);
     if (conflictingUrl !== undefined) {
       throw new Error(`Recipe source URL already exists as ${conflictingUrl.id}: ${source.baseUrl}`);
     }
@@ -94,19 +98,19 @@ export function setRecipeSourceEnabled(database: Database, input: unknown, enabl
   }).immediate();
 }
 
-export function removeRecipeSource(database: Database, input: unknown): void {
+export function removeRecipeSource(database: Database, input: unknown): "archived" | "removed" {
   const id = validateRecipeSourceId(input);
   const sources = createConfigurationRepositories(database).recipeSources;
-  database.transaction(() => {
+  return database.transaction(() => {
     if (sources.get(id) === null) throw new Error(`Recipe source does not exist: ${id}`);
     const referencedRecipes = database.query<{ count: number }, [string]>(
       "SELECT COUNT(*) AS count FROM recipes WHERE source_id = ?",
     ).get(id)?.count ?? 0;
     if (referencedRecipes > 0) {
-      throw new Error(
-        `Cannot remove recipe source ${id} while ${referencedRecipes} imported recipe${referencedRecipes === 1 ? "" : "s"} references it; disable it instead`,
-      );
+      sources.archive(id);
+      return "archived";
     }
     sources.remove(id);
+    return "removed";
   }).immediate();
 }

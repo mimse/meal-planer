@@ -5,9 +5,11 @@
 - Git
 - Bun 1.4 or newer
 - Node.js 18 or newer, including npm
-- Linux, macOS, or Windows with a Node/Bun toolchain supported by the pinned dependencies
+- Linux with glibc, `/proc` mounted, and a filesystem supporting `renameat2(RENAME_NOREPLACE)` for hardened backup/restore
 
 TilbudsTrolden is a pinned Node.js sidecar, so Node remains required even though the main CLI runs on Bun.
+
+Linux is the verified Phase 7 platform. Hardened backup/restore is Linux-only; macOS, Windows, and non-glibc Linux are not supported for these commands. Other CLI commands may work there, but are not verified by this delivery.
 
 ## Install from Git
 

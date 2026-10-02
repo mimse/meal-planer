@@ -12,7 +12,7 @@ import {
   type RecipeImport,
 } from "../../src/infrastructure/recipe-repository";
 import { migrations, runMigrations } from "../../src/infrastructure/migrations";
-import { removeRecipeSource, setRecipeSourceEnabled } from "../../src/commands/sources";
+import { addRecipeSource, readRecipeSources, removeRecipeSource, setRecipeSourceEnabled } from "../../src/commands/sources";
 
 const temporaryDirectories: string[] = [];
 
@@ -433,7 +433,7 @@ describe("recipe persistence", () => {
     database.close();
   });
 
-  test("allows disabling a referenced source but blocks deletion with a clear provenance error", async () => {
+  test("archives a referenced source and re-adds it without losing recipe provenance", async () => {
     const database = openDatabase(await temporaryDatabasePath());
     addSource(database);
     const recipes = createRecipeRepository(database);
@@ -441,10 +441,27 @@ describe("recipe persistence", () => {
 
     expect(setRecipeSourceEnabled(database, "example", false).enabled).toBe(false);
     expect(recipes.get(imported.id)).toEqual(imported);
-    expect(() => removeRecipeSource(database, "example")).toThrow(
-      "Cannot remove recipe source example while 1 imported recipe references it; disable it instead",
-    );
-    expect(createConfigurationRepositories(database).recipeSources.get("example")?.enabled).toBe(false);
+    expect(removeRecipeSource(database, "example")).toBe("archived");
+    expect(recipes.get(imported.id)).toEqual(imported);
+    expect(readRecipeSources(database).some(source => source.id === "example")).toBe(false);
+    expect(database.query("SELECT enabled, archived FROM recipe_sources WHERE id = 'example'").get())
+      .toEqual({ enabled: 0, archived: 1 });
+
+    expect(addRecipeSource(database, {
+      id: "example",
+      name: "Example Recipes",
+      baseUrl: "https://example.dk/",
+      adapter: "jsonld",
+      enabled: true,
+    })).toEqual({
+      id: "example",
+      name: "Example Recipes",
+      baseUrl: "https://example.dk/",
+      adapter: "jsonld",
+      enabled: true,
+    });
+    expect(readRecipeSources(database).some(source => source.id === "example")).toBe(true);
+    expect(recipes.get(imported.id)).toEqual(imported);
     database.close();
   });
 

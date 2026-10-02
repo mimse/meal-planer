@@ -426,7 +426,7 @@ Exit criterion: an accepted plan produces a complete ingredient list and, when l
 
 ### Phase 6 — hardening and distribution
 
-**Current scope:** Implemented: six source fixture contracts with provenance, deterministic planner property/oracle coverage, pinned MCP input/output contract checks, relocated-bundle and backup CLI end-to-end tests, and stable JSON for planning, shopping, source, recipe, configuration-read, integration, and backup outputs. `backup create` makes an integrity-checked SQLite snapshot and can include one explicitly selected persistent TilbudsTrolden 0.5.3 store; `backup restore` verifies fixed contents, checksums, schemas, migration history, SQLite integrity, and foreign keys before atomically publishing a new state directory. Normal private planning MCP sessions remain derived, ephemeral state. Distribution uses the Bun project with an idempotent `setup:runtime` command, a relocated-bundle smoke test, an explicit sidecar override, and production-path compatibility verification. Installation, source management, planning/replacement, backup/recovery, and troubleshooting are documented.
+**Current scope:** Implemented: six source fixture contracts with provenance, deterministic planner property/oracle coverage, pinned MCP input/output contract checks, relocated-bundle and backup CLI end-to-end tests, and stable JSON for planning, shopping, source, recipe, configuration-read, integration, and backup outputs. `backup create` makes an integrity-checked SQLite snapshot and can include one explicitly selected persistent TilbudsTrolden 0.5.3 store; `backup restore` verifies fixed contents, bounded manifests and MCP data, staged-file checksums, schemas, migration history and compatibility, SQLite integrity, foreign keys, and source/destination separation before atomically publishing a complete new state directory with no replacement. Normal private planning MCP sessions remain derived, ephemeral state. Distribution uses the Bun project with an idempotent `setup:runtime` command, a relocated-bundle smoke test, an explicit sidecar override, and production-path compatibility verification. Installation, source management, planning/replacement, backup/recovery, and troubleshooting are documented.
 
 **Limits:** A compiled Bun executable is experimental and is not the supported distribution because it does not contain the Node.js MCP sidecar or its runtime dependencies. Restore intentionally refuses in-place replacement and publishes only to a new directory. SQLite and an optional independently managed MCP JSON file are validated in one bundle but are not claimed as a cross-file point-in-time transaction. Live deal and six-source network probes remain optional rather than CI requirements.
 
@@ -435,6 +435,19 @@ Exit criterion: an accepted plan produces a complete ingredient list and, when l
 - Add `--json` for the CLI's own structured outputs; keep upstream MCP text as an explicitly labeled field.
 - Compile a standalone executable with `bun build --compile` if MCP child-process packaging remains reliable; otherwise distribute the Bun project plus a setup command for the pinned server.
 - Document installation, updating sources, planning, replacement, and troubleshooting.
+
+### Phase 7 — source archival and automated acceptance closure
+
+**Current scope:** Complete; 564 application tests, typecheck, production build, runtime smoke, 405 vendor tests, and diff checks pass. Independent review findings are resolved and final confirmation passed. Referenced recipe sources are archived rather than destructively deleted, preserving imported recipe provenance while removing the source from active configuration. A deterministic process-level acceptance workflow exercises the real CLI command handlers from setup through fixture-backed source discovery/sync, recipe review, planning, acceptance, Tuesday replacement, and a complete warned offline grocery list. Test-only recipe transport remains dependency-injected and cannot be selected by production flags or environment variables; production SSRF, DNS pinning, redirect, scope, media-type, and byte-limit protections remain unchanged. Hardened backup/restore targets Linux with glibc and `/proc`, as explicitly selected for this delivery.
+
+- Add a migration and repository behavior for active, disabled, and archived recipe sources.
+- Make `sources remove` archive a referenced source, omit archived sources from active listing/sync/planning, retain recipe provenance, and define re-add/reactivation behavior.
+- Add explicit Friday and Saturday planning-cycle boundary tests for the following Monday and its preceding Saturday shopping date.
+- Expose a production-default CLI run entry point with internal source-test/sync dependency injection for deterministic process tests.
+- Add a fixture-backed public-CLI source lifecycle and full setup → sync → review → create → accept → replace Tuesday → offline grocery-list acceptance workflow.
+- Keep current six-site and live-offer probes optional and separate from deterministic CI acceptance.
+
+Exit criterion: a synced source can be removed from active configuration without losing imported recipe provenance; Friday and Saturday resolve to the correct following Monday and shopping Saturday; the isolated public-CLI workflow proves six unchanged meals after Tuesday replacement and a complete warned offline grocery list; `bun run verify`, runtime smoke, vendor tests, and `git diff --check` pass.
 
 ## 12. Test strategy
 

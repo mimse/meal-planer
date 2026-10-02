@@ -155,4 +155,30 @@ describe("create plan", () => {
     expect(late.score.warnings.join("\n")).toContain("shopping date 2026-10-03 has passed");
     database.close();
   });
+
+  test("Friday and Saturday default planning both target the following Monday and preceding Saturday shop", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "meal-planer-cycle-boundary-"));
+    temporaryDirectories.push(directory);
+    const database = openDatabase(join(directory, "mealplan.sqlite"));
+    try {
+      applySetup(database, createSetupConfiguration({ members: [{ id: "family", name: "Family", kind: "adult", servings: 4 }] }));
+      Array.from({ length: 7 }, (_, index) => createRecipeRepository(database).import(input(index)));
+
+      const fridayPlan = createPlanDraft(database, {
+        seed: "friday-cycle",
+        plannedAt: "2026-10-02T12:00:00.000Z",
+      });
+      expect(fridayPlan.weekStart).toBe("2026-10-05");
+      expect(fridayPlan.shoppingDate).toBe("2026-10-03");
+
+      const saturdayPlan = createPlanDraft(database, {
+        seed: "saturday-cycle",
+        plannedAt: "2026-10-03T12:00:00.000Z",
+      });
+      expect(saturdayPlan.weekStart).toBe("2026-10-05");
+      expect(saturdayPlan.shoppingDate).toBe("2026-10-03");
+    } finally {
+      database.close();
+    }
+  });
 });
