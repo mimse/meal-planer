@@ -7,6 +7,7 @@ import { openDatabase } from "../../src/infrastructure/database";
 import { createConfigurationRepositories } from "../../src/infrastructure/configuration-repositories";
 import { createRecipeRepository, type RecipeImport } from "../../src/infrastructure/recipe-repository";
 import { migrations, runMigrations } from "../../src/infrastructure/migrations";
+import { evaluateRecipeForDay } from "../../src/domain/planner";
 
 const projectRoot = new URL("../..", import.meta.url).pathname;
 const temporaryDirectories: string[] = [];
@@ -60,6 +61,36 @@ afterEach(async () => {
 });
 
 describe("recipe CLI", () => {
+  test("reviews an unrestricted meat dinner without claiming special dietary suitability", async () => {
+    const root = await mkdtemp(join(tmpdir(), "meal-planer-unrestricted-cli-"));
+    temporaryDirectories.push(root);
+    const databasePath = join(root, "mealplan.sqlite");
+    const database = openDatabase(databasePath);
+    createConfigurationRepositories(database).recipeSources.upsert({
+      id: "example", name: "Example", baseUrl: "https://recipes.example/", adapter: "jsonld", enabled: true,
+    });
+    const original = createRecipeRepository(database).import({
+      ...recipeInput(), title: "Beef pasta", servings: 4, totalMinutes: 30, dietaryTags: [],
+      ingredients: [{ rawText: "500 g beef", normalizedName: "beef", quantity: 500, unit: "g", uncertain: false }],
+    });
+    database.close();
+    const reviewed = await runCli([
+      "--database", databasePath, "recipes", "review", original.id,
+      "--dietary-tag", "unrestricted", "--mark-reviewed", "--json",
+    ]);
+    expect(reviewed.exitCode, reviewed.stderr).toBe(0);
+    const shown = await runCli(["--database", databasePath, "recipes", "show", original.id, "--json"]);
+    expect(shown.exitCode, shown.stderr).toBe(0);
+    const saved = JSON.parse(shown.stdout);
+    expect(saved).toMatchObject({ dietaryTags: ["unrestricted"], needsReview: false });
+    const profile = { day: "mon" as const, maxTotalMinutes: 60, requiredServingModes: [], easyOnly: false, minimumExtraMeals: 0, prepLinkSatisfiesMinimum: false };
+    const context = { householdServings: 4, enabledSourceIds: new Set(["example"]), dietaryRestrictions: [], dislikedIngredients: [] };
+    expect(evaluateRecipeForDay(saved, profile, context).eligible).toBe(true);
+    for (const restriction of ["vegetarian", "vegan", "gluten-free", "halal"]) {
+      expect(evaluateRecipeForDay(saved, profile, { ...context, dietaryRestrictions: [restriction] }).eligible).toBe(false);
+    }
+  });
+
   test("searches, shows, and reviews a persisted recipe across separate processes", async () => {
     const root = await mkdtemp(join(tmpdir(), "meal-planer-recipe-cli-"));
     temporaryDirectories.push(root);

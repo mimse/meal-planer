@@ -1,4 +1,6 @@
 export const DIETARY_TAGS = [
+  // Explicit review classification; does not certify any special diet.
+  "unrestricted",
   "diabetic",
   "gluten-free",
   "halal",

@@ -211,7 +211,7 @@ describe("recipe extraction registry", () => {
     )).toThrow("spisbedre-inertia adapter is only allowed for its configured built-in host");
   });
 
-  test("normalizes every repository dietary enum identically across Schema.org adapters", () => {
+  test("normalizes Schema.org dietary enums without inventing a manual unrestricted classification", () => {
     const enumNames = [
       "DiabeticDiet",
       "GlutenFreeDiet",
@@ -237,9 +237,10 @@ describe("recipe extraction registry", () => {
       ${enumNames.map((name) => `<meta itemprop="suitableForDiet" content="https://schema.org/${name}">`).join("")}
     </div>`;
 
+    const sourceDietaryTags = DIETARY_TAGS.filter((tag) => tag !== "unrestricted");
     expect(extractRecipeJsonLd(jsonLd, new URL("https://recipes.example/diet")).dietaryTags)
-      .toEqual(DIETARY_TAGS);
+      .toEqual(sourceDietaryTags);
     expect(extractValdemarsroMicrodata(microdata, new URL("https://www.valdemarsro.dk/diet")).dietaryTags)
-      .toEqual(DIETARY_TAGS);
+      .toEqual(sourceDietaryTags);
   });
 });
