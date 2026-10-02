@@ -9,6 +9,7 @@ export const REVIEW_OVERRIDE_FIELDS = [
   "proteinTag",
   "dietaryTags",
   "suitabilityTags",
+  "extraMealServings",
   "preference",
   "needsReview",
 ] as const;

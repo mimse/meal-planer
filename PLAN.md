@@ -347,7 +347,7 @@ Recommended dependencies:
 
 ### Phase 0 — integration spikes
 
-**Current scope:** Phase 0 is complete. The repository contains the CLI shell, pinned-server compatibility probe, recipe fetch/extraction path, source findings, the backward-compatible `structuredContent` patch and contract tests for `score_recipes` and `generate_shopping_list`, and compact deterministic HTML fixtures for all six built-in recipe sources. Phase 2 now also has production extraction adapters, persistence, configured-source import and sync services, deterministic recipe search/show, and atomic noninteractive review. Planning remains later-phase work.
+**Current scope:** Phase 0 is complete. The repository contains the CLI shell, pinned-server compatibility probe, recipe fetch/extraction path, source findings, the backward-compatible `structuredContent` patch and contract tests for `score_recipes` and `generate_shopping_list`, and compact deterministic HTML fixtures for all six built-in recipe sources. Phase 2 also has production extraction adapters, persistence, configured-source import and sync services, deterministic recipe search/show, and atomic noninteractive review. The initial Phase 3 planner slice is implemented; see its scope and remaining work below.
 
 - Initialize the Bun/TypeScript CLI.
 - Pin and build TilbudsTrolden.
@@ -381,6 +381,10 @@ Exit criterion: configuration survives process restarts and can be edited non-in
 Exit criterion: all six built-in sources either import successfully or report a precise unsupported/blocked reason; a compatible new JSON-LD source can be added without changing the planner.
 
 ### Phase 3 — family-aware planner
+
+**Current scope:** Implemented and verified: pure-domain hard-constraint filtering, seeded bounded weekly search, seven distinct recipes with a vegetarian minimum, infeasibility explanations, weekly normalized-ingredient aggregation, pantry/reuse and package-remainder scoring, waste-first comparison, preference/history signals, SQLite migration 4, stable plan/meal IDs and hashes, and `plan create|show|accept` with JSON output. Recipe review now supports `extraMealServings`. Identical saved plan content is reused without rewriting accepted meal/history records. Full tests, typecheck, and production build pass.
+
+**Remaining before the Phase 3 exit criterion is complete:** Explicit prep-link/leftover modeling and consumption scoring; production ingredient normalization or reviewable measured quantities (imported raw ingredients remain uncertain); loading live preferred-store deals/package estimates into CLI planning rather than only accepting injected application inputs; broader planner constraint/property coverage and bounded-search completeness handling; shopping-window warnings. Like/dislike shortcuts remain deferred; preferences are editable through `recipes review`. Free-text dietary matching is not an allergen-safety guarantee. Do not mark the whole phase complete based on the implemented slice.
 
 - Implement hard-constraint filtering and soft scoring.
 - Aggregate weekly ingredient demand and score expected package remainders, perishability, pantry use, leftovers, and cross-recipe ingredient reuse.

@@ -94,6 +94,7 @@ describe("recipe CLI", () => {
       "--prep-minutes", "10",
       "--cook-minutes", "20",
       "--total-minutes", "30",
+      "--extra-meal-servings", "8",
       "--mark-reviewed", "--json",
     ]);
     expect(reviewed.exitCode, reviewed.stderr).toBe(0);
@@ -108,6 +109,7 @@ describe("recipe CLI", () => {
       prepMinutes: 10,
       cookMinutes: 20,
       totalMinutes: 30,
+      extraMealServings: 8,
       needsReview: false,
     });
 
@@ -142,7 +144,7 @@ describe("recipe CLI", () => {
       preference: "favorite",
       needsReview: true,
     });
-  });
+  }, 15_000);
 
   test("validates every recipe command syntax before a version-one database can be migrated", async () => {
     const root = await mkdtemp(join(tmpdir(), "meal-planer-preopen-cli-"));
@@ -174,6 +176,8 @@ describe("recipe CLI", () => {
       ["recipes", "review", recipeId, "--prep-minutes", "10", "--prep-minutes", "20"],
       ["recipes", "review", recipeId, "--cook-minutes", "10", "--cook-minutes", "20"],
       ["recipes", "review", recipeId, "--total-minutes", "10", "--total-minutes", "20"],
+      ["recipes", "review", recipeId, "--extra-meal-servings", "4", "--extra-meal-servings", "8"],
+      ["recipes", "review", recipeId, "--extra-meal-servings", "-1"],
       ["recipes", "review", recipeId, "--clear-servings", "--mark-reviewed"],
       ["recipes", "review", recipeId, "--clear-dietary-tags", "--mark-reviewed"],
       [
@@ -209,7 +213,7 @@ describe("recipe CLI", () => {
         .toEqual([]);
       unchanged.close();
     }
-  }, 30_000);
+  }, 60_000);
 
   test("rejects lossy raw import URL paths before opening a version-one database", async () => {
     const root = await mkdtemp(join(tmpdir(), "meal-planer-raw-url-cli-"));

@@ -171,6 +171,65 @@ export const migrations: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 4,
+    name: "family-aware weekly plans",
+    up(database) {
+      database.exec(`
+        CREATE TABLE weekly_plans (
+          id TEXT PRIMARY KEY CHECK (length(id) = 69),
+          week_start TEXT NOT NULL CHECK (length(week_start) = 10),
+          shopping_date TEXT NOT NULL CHECK (length(shopping_date) = 10),
+          planned_at TEXT NOT NULL CHECK (length(planned_at) BETWEEN 20 AND 30),
+          status TEXT NOT NULL CHECK (status IN ('draft', 'accepted', 'completed', 'superseded')),
+          seed TEXT NOT NULL CHECK (length(seed) BETWEEN 1 AND 500),
+          score_summary TEXT NOT NULL CHECK (
+            length(score_summary) <= 250000 AND json_valid(score_summary)
+              AND json_type(score_summary) = 'object'
+          )
+        ) STRICT;
+
+        CREATE UNIQUE INDEX weekly_plans_one_draft_per_week
+          ON weekly_plans(week_start) WHERE status = 'draft';
+        CREATE UNIQUE INDEX weekly_plans_one_accepted_per_week
+          ON weekly_plans(week_start) WHERE status = 'accepted';
+        CREATE INDEX weekly_plans_week_status ON weekly_plans(week_start, status);
+
+        CREATE TABLE plan_meals (
+          id TEXT PRIMARY KEY CHECK (length(id) = 69),
+          plan_id TEXT NOT NULL REFERENCES weekly_plans(id) ON DELETE CASCADE ON UPDATE RESTRICT,
+          day TEXT NOT NULL CHECK (day IN ('mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun')),
+          date TEXT NOT NULL CHECK (length(date) = 10),
+          recipe_id TEXT NOT NULL REFERENCES recipes(id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+          servings REAL NOT NULL CHECK (servings > 0 AND servings <= 1000000),
+          locked INTEGER NOT NULL DEFAULT 0 CHECK (locked IN (0, 1)),
+          rationale TEXT NOT NULL CHECK (
+            length(rationale) <= 100000 AND json_valid(rationale) AND json_type(rationale) = 'array'
+          ),
+          prep_links TEXT NOT NULL CHECK (
+            length(prep_links) <= 100000 AND json_valid(prep_links) AND json_type(prep_links) = 'array'
+          ),
+          content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+          UNIQUE(plan_id, day),
+          UNIQUE(plan_id, date)
+        ) STRICT;
+
+        CREATE INDEX plan_meals_recipe_id ON plan_meals(recipe_id);
+
+        CREATE TABLE meal_history (
+          id TEXT PRIMARY KEY CHECK (length(id) = 72),
+          recipe_id TEXT NOT NULL REFERENCES recipes(id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+          cooked_on TEXT NOT NULL CHECK (length(cooked_on) = 10),
+          plan_id TEXT NOT NULL REFERENCES weekly_plans(id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+          plan_meal_id TEXT NOT NULL REFERENCES plan_meals(id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+          recorded_at TEXT NOT NULL CHECK (length(recorded_at) BETWEEN 20 AND 30),
+          UNIQUE(plan_meal_id)
+        ) STRICT;
+
+        CREATE INDEX meal_history_cooked_on ON meal_history(cooked_on DESC, recipe_id);
+      `);
+    },
+  },
 ];
 
 function validateMigrations(pendingMigrations: readonly Migration[]): void {

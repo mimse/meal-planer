@@ -25,6 +25,7 @@ const reviewPatchSchema = z.object({
   prepMinutes: z.number().int().finite().nonnegative().max(525_600).nullable().optional(),
   cookMinutes: z.number().int().finite().nonnegative().max(525_600).nullable().optional(),
   totalMinutes: z.number().int().finite().nonnegative().max(525_600).nullable().optional(),
+  extraMealServings: z.number().finite().nonnegative().max(1_000_000).optional(),
   markReviewed: z.boolean().optional(),
 }).strict().superRefine((patch, context) => {
   for (const [key, values] of [
@@ -82,6 +83,7 @@ export function reviewRecipe(database: Database, recipeId: string, input: Recipe
       ...(patch.prepMinutes === undefined ? {} : { prepMinutes: patch.prepMinutes }),
       ...(patch.cookMinutes === undefined ? {} : { cookMinutes: patch.cookMinutes }),
       ...(patch.totalMinutes === undefined ? {} : { totalMinutes: patch.totalMinutes }),
+      ...(patch.extraMealServings === undefined ? {} : { extraMealServings: patch.extraMealServings }),
     };
     const complete = hasPlanningCriticalEvidence(candidate);
     if (patch.markReviewed === true && !complete) {
@@ -92,7 +94,7 @@ export function reviewRecipe(database: Database, recipeId: string, input: Recipe
     candidate.needsReview = patch.markReviewed === true ? false : current.needsReview || !complete;
     const editableFields = [
       "servings", "prepMinutes", "cookMinutes", "totalMinutes", "cuisineTags", "proteinTag",
-      "dietaryTags", "suitabilityTags", "preference",
+      "dietaryTags", "suitabilityTags", "extraMealServings", "preference",
     ] as const satisfies readonly Exclude<ReviewOverrideField, "needsReview">[];
     const changedFields: ReviewOverrideField[] = editableFields.filter((field) => patch[field] !== undefined);
     changedFields.push("needsReview");

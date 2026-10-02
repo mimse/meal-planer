@@ -28,6 +28,7 @@ describe("openDatabase", () => {
       { version: 1, name: "initial configuration" },
       { version: 2, name: "recipe ingestion persistence" },
       { version: 3, name: "bounded HTTP cache" },
+      { version: 4, name: "family-aware weekly plans" },
     ]);
     expect(database.query(`
       SELECT name
@@ -39,13 +40,16 @@ describe("openDatabase", () => {
       { name: "household_members" },
       { name: "household_rules" },
       { name: "http_cache" },
+      { name: "meal_history" },
       { name: "pantry_items" },
+      { name: "plan_meals" },
       { name: "preferred_stores" },
       { name: "recipe_ingredients" },
       { name: "recipe_instructions" },
       { name: "recipe_sources" },
       { name: "recipes" },
       { name: "schema_migrations" },
+      { name: "weekly_plans" },
     ]);
 
     database.close();
@@ -102,6 +106,7 @@ describe("openDatabase", () => {
       { version: 1, name: "initial configuration" },
       { version: 2, name: "recipe ingestion persistence" },
       { version: 3, name: "bounded HTTP cache" },
+      { version: 4, name: "family-aware weekly plans" },
     ]);
     expect(upgraded.query(`
       SELECT name FROM sqlite_master
@@ -627,16 +632,16 @@ describe("openDatabase", () => {
     const database = openDatabase(await temporaryDatabasePath());
     const knownHistory: readonly Migration[] = [
       ...migrations,
-      { version: 4, name: "fourth migration", up() {} },
       { version: 5, name: "fifth migration", up() {} },
+      { version: 6, name: "sixth migration", up() {} },
     ];
     database.query(`
       INSERT INTO schema_migrations (version, name, applied_at)
       VALUES (?, ?, ?)
-    `).run(5, "fifth migration", new Date().toISOString());
+    `).run(6, "sixth migration", new Date().toISOString());
 
     expect(() => runMigrations(database, knownHistory)).toThrow(
-      "Migration ledger is not a known ordered prefix: expected 4 (fourth migration), found 5 (fifth migration)",
+      "Migration ledger is not a known ordered prefix: expected 5 (fifth migration), found 6 (sixth migration)",
     );
 
     database.close();
@@ -671,7 +676,7 @@ describe("openDatabase", () => {
   test("persists a successful subsequent migration across close and reopen", async () => {
     const path = await temporaryDatabasePath();
     const subsequentMigration: Migration = {
-      version: 4,
+      version: 5,
       name: "subsequent migration",
       up(database) {
         database.exec("CREATE TABLE subsequent_migration_probe (id TEXT PRIMARY KEY) STRICT");
@@ -690,7 +695,8 @@ describe("openDatabase", () => {
         { version: 1, name: "initial configuration" },
         { version: 2, name: "recipe ingestion persistence" },
         { version: 3, name: "bounded HTTP cache" },
-        { version: 4, name: "subsequent migration" },
+        { version: 4, name: "family-aware weekly plans" },
+        { version: 5, name: "subsequent migration" },
       ]);
     expect(reopenedDatabase.query(`
       SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'subsequent_migration_probe'
@@ -731,6 +737,7 @@ describe("openDatabase", () => {
       { version: 1, name: "initial configuration" },
       { version: 2, name: "recipe ingestion persistence" },
       { version: 3, name: "bounded HTTP cache" },
+      { version: 4, name: "family-aware weekly plans" },
     ]);
     reopenedDatabase.close();
   });
@@ -739,14 +746,14 @@ describe("openDatabase", () => {
     const path = await temporaryDatabasePath();
     const database = openDatabase(path);
     const successfulMigration: Migration = {
-      version: 4,
+      version: 5,
       name: "successful before failure",
       up(migrationDatabase) {
         migrationDatabase.exec("CREATE TABLE committed_before_failure (id TEXT PRIMARY KEY) STRICT");
       },
     };
     const failingMigration: Migration = {
-      version: 5,
+      version: 6,
       name: "deliberate failure",
       up(migrationDatabase) {
         migrationDatabase.exec("CREATE TABLE should_be_rolled_back (id TEXT PRIMARY KEY) STRICT");
@@ -765,11 +772,11 @@ describe("openDatabase", () => {
     ])).toThrow("deliberate migration failure");
     expect(database.query("SELECT name FROM sqlite_master WHERE name = 'committed_before_failure'").get())
       .toEqual({ name: "committed_before_failure" });
-    expect(database.query("SELECT version FROM schema_migrations WHERE version = 4").get())
-      .toEqual({ version: 4 });
+    expect(database.query("SELECT version FROM schema_migrations WHERE version = 5").get())
+      .toEqual({ version: 5 });
     expect(database.query("SELECT name FROM sqlite_master WHERE name = 'should_be_rolled_back'").get()).toBeNull();
     expect(database.query("SELECT id FROM household_members WHERE id = 'rolled-back'").get()).toBeNull();
-    expect(database.query("SELECT version FROM schema_migrations WHERE version = 5").get()).toBeNull();
+    expect(database.query("SELECT version FROM schema_migrations WHERE version = 6").get()).toBeNull();
 
     database.close();
 

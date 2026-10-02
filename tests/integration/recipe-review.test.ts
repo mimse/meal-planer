@@ -64,6 +64,7 @@ describe("reviewRecipe", () => {
       prepMinutes: 10,
       cookMinutes: 20,
       totalMinutes: 30,
+      extraMealServings: 8,
       markReviewed: true,
     });
 
@@ -78,6 +79,7 @@ describe("reviewRecipe", () => {
       prepMinutes: 10,
       cookMinutes: 20,
       totalMinutes: 30,
+      extraMealServings: 8,
       needsReview: false,
     });
     for (const key of [
@@ -90,7 +92,7 @@ describe("reviewRecipe", () => {
       url: "https://recipes.example/soup",
       reviewOverrides: [
         "servings", "prepMinutes", "cookMinutes", "totalMinutes", "cuisineTags", "proteinTag",
-        "dietaryTags", "suitabilityTags", "preference", "needsReview",
+        "dietaryTags", "suitabilityTags", "extraMealServings", "preference", "needsReview",
       ],
     });
     expect(repository.get(original.id)).toEqual(reviewed);

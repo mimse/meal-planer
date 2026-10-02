@@ -14,6 +14,11 @@ import { runSetupWorkflow } from "./commands/setup-workflow";
 import type { SetupAnswers } from "./commands/setup";
 import { runSourceTest } from "./application/test-source";
 import { runSourceSync } from "./application/source-sync";
+import {
+  createPlanDraft,
+  localDateInDenmark,
+  resolvePlanWeekStart,
+} from "./application/create-plan";
 import { importRecipeUrl, parseRecipeLimit, parseRecipeRequestUrl } from "./application/recipe-ingestion";
 import { parseRecipeReviewPatch, reviewRecipe, type RecipeReviewPatch } from "./application/recipe-review";
 import { DIETARY_TAGS } from "./domain/recipe";
@@ -36,6 +41,7 @@ import {
 } from "./infrastructure/recipe-repository";
 import { createConfigurationRepositories } from "./infrastructure/configuration-repositories";
 import { resolveDatabasePath } from "./infrastructure/database-path";
+import { createPlanRepository, type WeeklyPlan } from "./infrastructure/plan-repository";
 import { ClackPromptAdapter } from "./presentation/prompts";
 
 const program = new Command()
@@ -87,6 +93,12 @@ function nonnegativeInteger(value: string, label: string): number {
   return parsed;
 }
 
+function nonnegativeNumber(value: string, label: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) throw new Error(`${label} must be a non-negative number`);
+  return parsed;
+}
+
 function rejectSetClearConflict(set: boolean, clear: boolean | undefined, label: string): void {
   if (set && clear === true) throw new Error(`Cannot set and clear ${label} in the same review`);
 }
@@ -101,6 +113,17 @@ function printRecipe(recipe: Recipe): void {
   for (const [index, ingredient] of recipe.ingredients.entries()) console.log(`${index + 1}. ${ingredient.rawText}`);
   console.log(`Instructions (${recipe.instructions.length})`);
   for (const [index, instruction] of recipe.instructions.entries()) console.log(`${index + 1}. ${instruction}`);
+}
+
+function printPlan(plan: WeeklyPlan, recipesById: ReadonlyMap<string, Recipe>): void {
+  console.log(`${plan.weekStart} · ${plan.status} · shopping ${plan.shoppingDate}`);
+  for (const meal of plan.meals) {
+    const recipe = recipesById.get(meal.recipeId);
+    console.log(`${meal.day} ${meal.date}: ${recipe?.title ?? meal.recipeId}${recipe === undefined ? "" : ` · ${recipe.sourceUrl}`}`);
+    for (const reason of meal.rationale) console.log(`  - ${reason}`);
+  }
+  for (const explanation of plan.score.explanations) console.log(`Reuse: ${explanation}`);
+  for (const warning of plan.score.warnings) console.log(`Warning: ${warning}`);
 }
 
 const prompts = new ClackPromptAdapter();
@@ -488,6 +511,7 @@ recipes.command("review")
   .option("--clear-cook-minutes", "clear cooking duration")
   .option("--total-minutes <n>", "set total duration", collectAtMostTwo, [])
   .option("--clear-total-minutes", "clear total duration")
+  .option("--extra-meal-servings <n>", "set servings produced beyond the planned dinner", collectAtMostTwo, [])
   .option("--mark-reviewed", "clear needs-review only when planning-critical evidence is complete")
   .option("--json", "emit stable JSON")
   .action((recipeId: string, options: {
@@ -508,6 +532,7 @@ recipes.command("review")
     clearCookMinutes?: boolean;
     totalMinutes: string[];
     clearTotalMinutes?: boolean;
+    extraMealServings: string[];
     markReviewed?: boolean;
     json?: boolean;
   }) => {
@@ -518,6 +543,7 @@ recipes.command("review")
     const prepMinutes = singletonOption(options.prepMinutes, "--prep-minutes");
     const cookMinutes = singletonOption(options.cookMinutes, "--cook-minutes");
     const totalMinutes = singletonOption(options.totalMinutes, "--total-minutes");
+    const extraMealServings = singletonOption(options.extraMealServings, "--extra-meal-servings");
     rejectSetClearConflict(options.dietaryTag.length > 0, options.clearDietaryTags, "dietary tags");
     rejectSetClearConflict(options.suitabilityTag.length > 0, options.clearSuitabilityTags, "suitability tags");
     rejectSetClearConflict(options.cuisineTag.length > 0, options.clearCuisineTags, "cuisine tags");
@@ -553,6 +579,9 @@ recipes.command("review")
       ...(options.clearPrepMinutes === true ? { prepMinutes: null } : prepMinutes === undefined ? {} : { prepMinutes: nonnegativeInteger(prepMinutes, "Prep minutes") }),
       ...(options.clearCookMinutes === true ? { cookMinutes: null } : cookMinutes === undefined ? {} : { cookMinutes: nonnegativeInteger(cookMinutes, "Cook minutes") }),
       ...(options.clearTotalMinutes === true ? { totalMinutes: null } : totalMinutes === undefined ? {} : { totalMinutes: nonnegativeInteger(totalMinutes, "Total minutes") }),
+      ...(extraMealServings === undefined ? {} : {
+        extraMealServings: nonnegativeNumber(extraMealServings, "Extra meal servings"),
+      }),
       ...(options.markReviewed === true ? { markReviewed: true } : {}),
     };
     if (Object.keys(patchInput).length === 0) throw new Error("At least one recipe review option is required");
@@ -586,6 +615,81 @@ recipes
     }
 
     console.log(`${recipe.title}\n${recipe.canonicalUrl}`);
+  });
+
+const plan = program.command("plan").description("Create, inspect, and accept weekly meal plans");
+
+plan.command("create")
+  .description("Create and save a deterministic family-aware draft")
+  .option("--week <date|next>", "date in the requested week, or next", collectAtMostTwo, [])
+  .option("--seed <value>", "deterministic selection seed", collectAtMostTwo, [])
+  .option("--json", "emit stable JSON")
+  .action((options: { week: string[]; seed: string[]; json?: boolean }) => {
+    const requestedWeek = singletonOption(options.week, "--week");
+    const requestedSeed = singletonOption(options.seed, "--seed");
+    const plannedAt = new Date().toISOString();
+    const weekStart = resolvePlanWeekStart(requestedWeek, localDateInDenmark(new Date(plannedAt)));
+    const seed = requestedSeed ?? `week:${weekStart}`;
+    if (seed.length === 0 || seed.length > 500) throw new Error("--seed must contain 1-500 characters");
+    const database = openExistingDatabase(databasePath());
+    try {
+      const created = createPlanDraft(database, { week: weekStart, seed, plannedAt });
+      if (options.json) process.stdout.write(`${JSON.stringify(created, null, 2)}\n`);
+      else {
+        const recipesById = new Map(createRecipeRepository(database).list({ limit: 500 })
+          .map((recipe) => [recipe.id, recipe]));
+        printPlan(created, recipesById);
+      }
+    } finally {
+      database.close();
+    }
+  });
+
+plan.command("show")
+  .description("Show the active draft or accepted plan for a week")
+  .option("--week <date|next>", "date in the requested week, or next", collectAtMostTwo, [])
+  .option("--json", "emit stable JSON")
+  .action((options: { week: string[]; json?: boolean }) => {
+    const requestedWeek = singletonOption(options.week, "--week");
+    const weekStart = resolvePlanWeekStart(requestedWeek, localDateInDenmark());
+    const database = openExistingDatabase(databasePath());
+    try {
+      const shown = createPlanRepository(database).getForWeek(weekStart);
+      if (shown === null) throw new Error(`No plan exists for week ${weekStart}`);
+      if (options.json) process.stdout.write(`${JSON.stringify(shown, null, 2)}\n`);
+      else {
+        const recipesById = new Map(createRecipeRepository(database).list({ limit: 500 })
+          .map((recipe) => [recipe.id, recipe]));
+        printPlan(shown, recipesById);
+      }
+    } finally {
+      database.close();
+    }
+  });
+
+plan.command("accept")
+  .description("Accept the saved draft for a week and record meal history")
+  .option("--week <date|next>", "date in the requested week, or next", collectAtMostTwo, [])
+  .option("--json", "emit stable JSON")
+  .action((options: { week: string[]; json?: boolean }) => {
+    const requestedWeek = singletonOption(options.week, "--week");
+    const weekStart = resolvePlanWeekStart(requestedWeek, localDateInDenmark());
+    const acceptedAt = new Date().toISOString();
+    const database = openExistingDatabase(databasePath());
+    try {
+      const repository = createPlanRepository(database);
+      const current = repository.getForWeek(weekStart);
+      if (current === null) throw new Error(`No plan exists for week ${weekStart}`);
+      const accepted = repository.accept(current.id, acceptedAt);
+      if (options.json) process.stdout.write(`${JSON.stringify(accepted, null, 2)}\n`);
+      else {
+        const recipesById = new Map(createRecipeRepository(database).list({ limit: 500 })
+          .map((recipe) => [recipe.id, recipe]));
+        printPlan(accepted, recipesById);
+      }
+    } finally {
+      database.close();
+    }
   });
 
 const integrations = program
