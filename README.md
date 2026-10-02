@@ -2,7 +2,7 @@
 
 A local, family-aware meal-planning CLI for Denmark, built with TypeScript and Bun.
 
-The Phase 0 integration-evidence milestone and Phase 1 local setup are complete. Phase 2 includes durable recipe ingestion, safe bounded discovery, source synchronization, deterministic search/show, and noninteractive review. Phases 3 and 4 add family-aware weekly planning, measured ingredients, verified future prep/leftover links, live preferred-store deal/package inputs, and atomic target-day replacement. The Phase 2 live-source exit criterion has not been reverified against all six current websites. Final grouped shopping-list generation remains Phase 5 work.
+The Phase 0 integration-evidence milestone and Phase 1 local setup are complete. Phase 2 includes durable recipe ingestion, safe bounded discovery, source synchronization, deterministic search/show, and noninteractive review. Phases 3 and 4 add family-aware weekly planning, measured ingredients, verified future prep/leftover links, live preferred-store deal/package inputs, and atomic target-day replacement. Phase 5 adds accepted-plan grocery aggregation, grouped current store offers, package-remainder explanations, and complete offline lists. The Phase 2 live-source exit criterion has not been reverified against all six current websites.
 
 ## Development
 
@@ -42,6 +42,7 @@ bun run src/cli.ts plan accept [--week next|YYYY-MM-DD] [--json]
 bun run src/cli.ts plan replace <day> [--week next|YYYY-MM-DD] [--preview] [--no-deals] [--json]
 bun run src/cli.ts plan replace <day> --with <recipe-id> --yes [--rejection not-this-week|disliked|none] [--no-deals] [--json]
 bun run src/cli.ts plan lock|unlock <day> [--week next|YYYY-MM-DD] [--json]
+bun run src/cli.ts shopping-list [--week next|YYYY-MM-DD] [--refresh-deals|--no-deals] [--json]
 bun run src/cli.ts recipes prep-link <recipe-id> --target-meal <id> --ingredient <name> --quantity <n> --unit g|ml|stk --note <text> [--kind prep|leftover] [--json]
 bun run src/cli.ts recipes remove-prep-link <link-id>
 bun run src/cli.ts recipes inspect <recipe-url> --json
@@ -95,7 +96,17 @@ The scorer aggregates measured ingredient quantities, rewards reuse and pantry c
 
 `plan replace thursday --week next` offers ranked candidates interactively on a terminal, shows ingredient additions/removals and deal/waste deltas, asks how to record the rejected recipe, and requires confirmation. `--preview`, `--json` without `--yes`, and noninteractive invocations are read-only. For automation, preview first, then use `--with <recipe-id> --yes`. `--rejection not-this-week` is the default; `disliked` persists a preference override across source refresh, and `none` stores no rejection. Use `plan lock|unlock <day>` for explicit locks.
 
-Confirmation checks the full original plan, current-week identity, and live recipe/configuration/prep evidence inside one SQLite transaction. Exactly one meal changes; its stable ID and the other six records/hashes are preserved. Accepted target history, the score, rejection state, and revision audit update atomically. Changed or locked targets, stale previews, and invalid candidates fail without partial writes. The final grouped shopping-list command remains Phase 5 work; replacement already computes measured ingredient/deal/waste deltas across the fixed seven assignments.
+Confirmation checks the full original plan, current-week identity, and live recipe/configuration/prep evidence inside one SQLite transaction. Exactly one meal changes; its stable ID and the other six records/hashes are preserved. Accepted target history, the score, rejection state, and revision audit update atomically. Changed or locked targets, stale previews, and invalid candidates fail without partial writes. The next `shopping-list` invocation reaggregates the accepted seven assignments, including a confirmed replacement; an unaccepted new draft does not replace the accepted shopping plan.
+
+## Grocery lists
+
+Run `shopping-list --week next --refresh-deals` after accepting the plan. Every invocation rebuilds from the accepted meals and fetches fresh offers by default; `--refresh-deals` makes that intent explicit, and `--no-deals` performs no provider I/O. Invalid/repeated week arguments and contradictory refresh/offline flags fail before SQLite opens. Lists are read-only derived output, not cached inventory records: generating a list never consumes pantry stock or changes meals/history, and a concurrent change to accepted assignments, recipes, pantry, household or relevant prep evidence refuses the stale result.
+
+Quantities use each saved meal's actual production servings, including Sunday's extra batch portions. Compatible measured pantry quantities are deducted once per ingredient/unit; incompatible units remain separate and uncertain raw lines stay visible for review, with their source recipes and URLs. Extra ingredient prep adds demand to its bound Sunday producer; leftovers already included in batch servings are not added twice. Incoming prep/leftover quantities are deducted only when a unique earlier accepted Sunday producer and current evidence validate the saved target link. Those are planned transfers, not proof that food was cooked or safely stored; warnings request verification. Pantry quantities describe current user-maintained stock and are not automatically reserved across different weeks.
+
+The isolated pinned MCP session receives the household, configured live store identities, pantry and exactly seven scaled saved meal payloads. Upstream name-only pantry skipping is disabled; local quantitative deductions remain authoritative. Output groups valid preferred-store matches, regular-price/unmatched purchases and fully pantry/prep-covered ingredients. Offers include package and unit-price evidence when known, validity dates, confidence and retrieval time. High-confidence measured pack evidence drives local pack counts, estimated costs, final remainder and the named later recipes consuming earlier package remainders. Storage life is not inferred. Low-confidence, unknown-pack and unknown-price offers require review and never contribute automatic price estimates. Provider/schema/startup/timeout failures retain the complete local list with explicit warnings.
+
+`--json` writes one structured list to stdout; warnings also go to stderr. Its `totals.isComplete` means every purchase has a matched estimate, not that a checkout price is guaranteed. The subtotal always excludes unknown regular prices and is never a checkout total. Raw TilbudsTrolden text is retained under `provider` as clearly labelled unfiltered diagnostics; human recommendations use validated structured matches rather than reproducing possibly expired or unconfigured offers from that text.
 
 The database path is resolved in this order:
 

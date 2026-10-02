@@ -45,6 +45,7 @@ import { createPlanRepository, type WeeklyPlan } from "./infrastructure/plan-rep
 import { createPrepLinkRepository, parsePrepLinkInput } from "./infrastructure/prep-link-repository";
 import { ClackPromptAdapter } from "./presentation/prompts";
 import { registerPlanEditCommands } from "./presentation/plan-edit-commands";
+import { registerShoppingListCommand } from "./presentation/shopping-list-command";
 
 const program = new Command()
   .name("mealplan")
@@ -660,6 +661,7 @@ recipes.command("remove-prep-link")
 
 const plan = program.command("plan").description("Create, inspect, accept, and edit weekly meal plans");
 registerPlanEditCommands(plan, databasePath);
+registerShoppingListCommand(program, databasePath);
 
 plan.command("create")
   .description("Create and save a deterministic family-aware draft")
