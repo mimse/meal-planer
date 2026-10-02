@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { applySetup, createSetupConfiguration } from "../../src/commands/setup";
 import { openDatabase } from "../../src/infrastructure/database";
 import { createRecipeRepository, type RecipeImport } from "../../src/infrastructure/recipe-repository";
+import { createPlanDraft } from "../../src/application/create-plan";
 
 const projectRoot = new URL("../..", import.meta.url).pathname;
 const temporaryDirectories: string[] = [];
@@ -56,6 +57,25 @@ afterEach(async () => {
 });
 
 describe("plan CLI", () => {
+  test("creates explicit future prep links through the CLI", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "meal-planer-prep-cli-"));
+    temporaryDirectories.push(directory);
+    const databasePath = join(directory, "mealplan.sqlite");
+    const database = openDatabase(databasePath);
+    applySetup(database, createSetupConfiguration({ members: [{ id: "family", name: "Family", kind: "adult", servings: 4 }] }));
+    const repository = createRecipeRepository(database);
+    const recipes = Array.from({ length: 8 }, (_, index) => repository.import(input(index)));
+    const future = createPlanDraft(database, { week: "2026-10-12", seed: "future", plannedAt: "2026-10-01T12:00:00.000Z" });
+    for (let index = 0; index < 8; index += 1) repository.import({ ...input(index), extraMealServings: 0, suitabilityTags: index === 7 ? ["prepAhead"] : ["quick", "keepWarm", "reheatFriendly"] });
+    database.close();
+    const linked = await runCli(["--database", databasePath, "recipes", "prep-link", recipes[7]!.id, "--target-meal", future.meals[0]!.id, "--ingredient", "carrots", "--quantity", "50", "--unit", "g", "--note", "Prep carrots", "--json"]);
+    expect(linked.exitCode, linked.stderr).toBe(0);
+    const link = JSON.parse(linked.stdout);
+    const created = await runCli(["--database", databasePath, "plan", "create", "--week", "2026-10-05", "--seed", "prep", "--no-deals", "--json"]);
+    expect(created.exitCode, created.stderr).toBe(0);
+    expect(JSON.parse(created.stdout).meals[6].prepLinks).toEqual([link.id]);
+  }, 15_000);
+
   test("creates, shows, and accepts a deterministic weekly plan across processes", async () => {
     const directory = await mkdtemp(join(tmpdir(), "meal-planer-plan-cli-"));
     temporaryDirectories.push(directory);
@@ -70,13 +90,14 @@ describe("plan CLI", () => {
 
     const created = await runCli([
       "--database", databasePath, "plan", "create",
-      "--week", "2026-10-07", "--seed", "cli-seed", "--json",
+      "--week", "2026-10-07", "--seed", "cli-seed", "--no-deals", "--json",
     ]);
     expect(created.exitCode, created.stderr).toBe(0);
     const draft = JSON.parse(created.stdout);
     expect(draft.weekStart).toBe("2026-10-05");
     expect(draft.status).toBe("draft");
     expect(draft.meals).toHaveLength(7);
+    expect(draft.score.warnings.join("\n")).toContain("Deal lookup disabled");
 
     const shown = await runCli([
       "--database", databasePath, "plan", "show", "--week", "2026-10-05", "--json",
@@ -100,5 +121,8 @@ describe("plan CLI", () => {
     expect(result.stdout).toContain("create");
     expect(result.stdout).toContain("show");
     expect(result.stdout).toContain("accept");
+    expect(result.stdout).toContain("replace");
+    expect(result.stdout).toContain("lock");
+    expect(result.stdout).toContain("unlock");
   });
 });

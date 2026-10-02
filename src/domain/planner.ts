@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { normalizeMeasuredQuantity } from "./ingredients";
+import { DIETARY_TAGS } from "./recipe";
 
 export const DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
 
@@ -46,6 +48,20 @@ export type ConstraintContext = {
   readonly enabledSourceIds: ReadonlySet<string>;
   readonly dietaryRestrictions: readonly string[];
   readonly dislikedIngredients: readonly string[];
+  readonly verifiedPrepRecipeIds?: ReadonlySet<string>;
+  readonly verifiedPrepLinks?: readonly VerifiedPrepLink[];
+};
+
+export type VerifiedPrepLink = {
+  readonly id: string;
+  readonly sourceRecipeId: string;
+  readonly targetMealId: string;
+  readonly targetDate: string;
+  readonly kind: "prep" | "leftover";
+  readonly normalizedIngredient: string;
+  readonly quantity: number;
+  readonly unit: string;
+  readonly note: string;
 };
 
 export type ConstraintEvaluation = {
@@ -115,6 +131,8 @@ export type WeeklyScoreContext = {
   readonly preferredStoreIds: ReadonlySet<string>;
   readonly shoppingDate: string;
   readonly recentRecipeIds: ReadonlySet<string>;
+  readonly recipeServings?: ReadonlyMap<string, number>;
+  readonly prepLinks?: readonly VerifiedPrepLink[];
 };
 
 export type PredictedRemainder = {
@@ -153,6 +171,7 @@ const servingModeTags: Readonly<Record<ServingMode, SuitabilityTag | null>> = {
 };
 
 const dietaryRestrictionTags: Readonly<Record<string, string>> = {
+  ...Object.fromEntries(DIETARY_TAGS.map((tag) => [tag, tag])),
   "diabetic": "diabetic",
   "gluten": "gluten-free",
   "gluten free": "gluten-free",
@@ -182,7 +201,7 @@ function recipeProvesDietaryTag(recipe: PlannerRecipe, requiredTag: string): boo
 function ingredientContains(recipe: PlannerRecipe, value: string): boolean {
   const needle = normalizeText(value);
   return recipe.ingredients.some((ingredient) => {
-    const evidence = ingredient.normalizedName ?? ingredient.rawText;
+    const evidence = `${ingredient.normalizedName ?? ""} ${ingredient.rawText}`;
     return normalizeText(evidence).includes(needle);
   });
 }
@@ -198,13 +217,6 @@ function rounded(value: number): number {
   return Math.round((value + Number.EPSILON) * 1_000_000) / 1_000_000;
 }
 
-function parseMeasuredQuantity(value: string): { readonly quantity: number; readonly unit: string } | null {
-  const match = /^\s*(\d+(?:[.,]\d+)?)\s*([\p{L}]+)\s*$/u.exec(value);
-  if (match === null) return null;
-  const quantity = Number(match[1]!.replace(",", "."));
-  if (!Number.isFinite(quantity) || quantity <= 0) return null;
-  return { quantity, unit: normalizeText(match[2]!) };
-}
 
 function perishabilityWeight(value: Perishability): number {
   if (value === "short-lived") return 5;
@@ -228,7 +240,7 @@ export function scoreWeeklyRecipes(
       warnings.add(`${recipe.title}: servings are unknown; ingredient demand is unscored`);
       continue;
     }
-    const scale = context.householdServings / recipe.servings;
+    const scale = (context.recipeServings?.get(recipe.id) ?? context.householdServings) / recipe.servings;
     for (const ingredient of recipe.ingredients) {
       if (
         ingredient.uncertain
@@ -255,8 +267,15 @@ export function scoreWeeklyRecipes(
   }
 
   const pantry = new Map<string, number>();
+  const selectedRecipeIds = new Set(recipes.map(({ id }) => id));
+  const selectedPrepLinks = (context.prepLinks ?? []).filter(({ sourceRecipeId }) => selectedRecipeIds.has(sourceRecipeId));
+  for (const link of selectedPrepLinks.filter(({ kind }) => kind === "prep")) {
+    const key = `${normalizeText(link.normalizedIngredient)}\0${normalizeText(link.unit)}`;
+    const aggregate = demand.get(key);
+    if (aggregate !== undefined) aggregate.quantity += link.quantity;
+  }
   for (const item of context.pantryItems) {
-    const measured = parseMeasuredQuantity(item.quantity);
+    const measured = normalizeMeasuredQuantity(item.quantity);
     if (measured === null) continue;
     pantry.set(`${normalizeText(item.normalizedName)}\0${measured.unit}`, measured.quantity);
   }
@@ -311,7 +330,6 @@ export function scoreWeeklyRecipes(
     });
   }
 
-  const selectedRecipeIds = new Set(recipes.map(({ id }) => id));
   const dealValue = context.dealSignals
     .filter((deal) => selectedRecipeIds.has(deal.recipeId))
     .filter((deal) => context.preferredStoreIds.has(deal.storeId))
@@ -322,6 +340,10 @@ export function scoreWeeklyRecipes(
   const historyPenalty = recipes.filter(({ id }) => context.recentRecipeIds.has(id)).length;
   const cuisines = new Set(recipes.flatMap(({ cuisineTags }) => cuisineTags));
   const proteins = new Set(recipes.flatMap(({ proteinTag }) => proteinTag === null ? [] : [proteinTag]));
+  for (const link of selectedPrepLinks) {
+    reuseCredit += 1;
+    explanations.push(`${link.note}: ${link.quantity} ${link.unit} ${link.normalizedIngredient} linked to ${link.targetDate} [${link.targetMealId}]`);
+  }
   remainderPenalty = rounded(remainderPenalty);
   oneOffPenalty = rounded(oneOffPenalty);
   reuseCredit = rounded(reuseCredit);
@@ -365,20 +387,19 @@ export function evaluateRecipeForDay(
   if (recipe.ingredients.length === 0) reasons.push("recipe has no ingredient evidence");
   if (recipe.dietaryTags.length === 0) reasons.push("recipe has no dietary classification");
   for (const restriction of context.dietaryRestrictions) {
-    const requiredTag = dietaryRestrictionTags[normalizeText(restriction)];
-    if (requiredTag !== undefined && !recipeProvesDietaryTag(recipe, requiredTag)) {
-      reasons.push(`does not prove dietary restriction: ${restriction}`);
-    } else if (requiredTag === undefined) {
-      for (const term of restrictionIngredientTerms(restriction)) {
-        if (ingredientContains(recipe, term)) {
-          reasons.push(`contains restricted ingredient: ${restriction}`);
-          break;
+    for (const term of restrictionIngredientTerms(restriction)) {
+      const requiredTag = dietaryRestrictionTags[term];
+      if (requiredTag !== undefined) {
+        if (!recipeProvesDietaryTag(recipe, requiredTag)) {
+          reasons.push(`does not prove dietary restriction: ${restriction}`);
         }
+      } else if (ingredientContains(recipe, term)) {
+        reasons.push(`contains restricted ingredient: ${restriction}`);
       }
     }
   }
   for (const dislikedIngredient of context.dislikedIngredients) {
-    if (ingredientContains(recipe, dislikedIngredient)) {
+    if (restrictionIngredientTerms(dislikedIngredient).some((term) => ingredientContains(recipe, term))) {
       reasons.push(`contains disliked ingredient: ${dislikedIngredient}`);
     }
   }
@@ -406,7 +427,9 @@ export function evaluateRecipeForDay(
 
   if (profile.minimumExtraMeals > 0) {
     const requiredExtraServings = context.householdServings * profile.minimumExtraMeals;
-    if (recipe.extraMealServings < requiredExtraServings) {
+    const hasVerifiedPrep = profile.prepLinkSatisfiesMinimum
+      && context.verifiedPrepRecipeIds?.has(recipe.id) === true;
+    if (recipe.extraMealServings < requiredExtraServings && !hasVerifiedPrep) {
       reasons.push(
         `needs ${requiredExtraServings} extra serving(s) or an explicit preparation link`,
       );
@@ -438,13 +461,40 @@ function seededOrder(seed: string, day: Day, recipeId: string): string {
 function compareScores(left: WeeklyPlanScore, right: WeeklyPlanScore): number {
   return left.wastePenalty - right.wastePenalty
     || right.dealValue - left.dealValue
-    || right.favoriteCount - left.favoriteCount
     || left.historyPenalty - right.historyPenalty
-    || right.varietyScore - left.varietyScore;
+    || right.varietyScore - left.varietyScore
+    || right.favoriteCount - left.favoriteCount;
 }
 
 function vegetarian(recipe: PlannerRecipe): boolean {
   return recipe.dietaryTags.includes("vegetarian") || recipe.dietaryTags.includes("vegan");
+}
+
+// Exact bipartite matching proves feasibility independently of heuristic scoring.
+function feasibleWeek(candidates: ReadonlyMap<Day, readonly PlannerRecipe[]>): readonly PlannerRecipe[] | null {
+  for (const fixedDay of DAYS) {
+    for (const fixedRecipe of candidates.get(fixedDay)!.filter(vegetarian)) {
+      const assigned = new Map<Day, PlannerRecipe>([[fixedDay, fixedRecipe]]);
+      const owners = new Map<string, Day>([[fixedRecipe.id, fixedDay]]);
+      const augment = (day: Day, visited: Set<string>): boolean => {
+        for (const candidate of candidates.get(day)!) {
+          if (candidate.id === fixedRecipe.id || visited.has(candidate.id)) continue;
+          visited.add(candidate.id);
+          const owner = owners.get(candidate.id);
+          if (owner === undefined || augment(owner, visited)) {
+            assigned.set(day, candidate);
+            owners.set(candidate.id, day);
+            return true;
+          }
+        }
+        return false;
+      };
+      if (DAYS.filter((day) => day !== fixedDay).every((day) => augment(day, new Set()))) {
+        return DAYS.map((day) => assigned.get(day)!);
+      }
+    }
+  }
+  return null;
 }
 
 function rationaleFor(profile: PlannerDayProfile, recipe: PlannerRecipe): string[] {
@@ -456,7 +506,7 @@ function rationaleFor(profile: PlannerDayProfile, recipe: PlannerRecipe): string
     rationale.push(`supports ${profile.requiredServingModes.join(" or ")}`);
   }
   if (profile.easyOnly) rationale.push("classified as easy");
-  if (profile.minimumExtraMeals > 0) {
+  if (profile.minimumExtraMeals > 0 && recipe.extraMealServings > 0) {
     rationale.push(`provides ${recipe.extraMealServings} extra serving(s)`);
   }
   if (vegetarian(recipe)) rationale.push("vegetarian");
@@ -510,6 +560,11 @@ export function generateWeeklyPlan(input: WeeklyPlannerInput): WeeklyPlannerResu
     };
   }
 
+  const witness = feasibleWeek(candidatesByDay);
+  if (witness === null) {
+    return { status: "infeasible", reasons: ["Fewer than seven distinct recipes can satisfy all daily and weekly constraints"] };
+  }
+
   const shoppingDate = addDays(weekStart, -2);
   const scoreContext: WeeklyScoreContext = input.scoreContext ?? {
     householdServings: input.context.householdServings,
@@ -520,6 +575,15 @@ export function generateWeeklyPlan(input: WeeklyPlannerInput): WeeklyPlannerResu
     shoppingDate,
     recentRecipeIds: new Set<string>(),
   };
+  const servingsFor = (candidate: PlannerRecipe, index: number): number =>
+    input.context.householdServings + (input.dayProfiles.find(({ day }) => day === DAYS[index])!.minimumExtraMeals > 0
+      ? candidate.extraMealServings : 0);
+  const scoreSelection = (selected: readonly PlannerRecipe[]): WeeklyPlanScore => scoreWeeklyRecipes(selected, {
+    ...scoreContext,
+    recipeServings: new Map(selected.map((candidate, index) => [candidate.id, servingsFor(candidate, index)])),
+    prepLinks: (scoreContext.prepLinks ?? input.context.verifiedPrepLinks ?? [])
+      .filter(({ sourceRecipeId }) => selected[6]?.id === sourceRecipeId),
+  });
   type SearchState = {
     readonly selected: readonly PlannerRecipe[];
     readonly used: ReadonlySet<string>;
@@ -544,7 +608,7 @@ export function generateWeeklyPlan(input: WeeklyPlannerInput): WeeklyPlannerResu
         expanded.push({
           selected,
           used: new Set([...state.used, candidate.id]),
-          score: scoreWeeklyRecipes(selected, scoreContext),
+          score: scoreSelection(selected),
           tieBreak: createHash("sha256")
             .update(`${input.seed}\0${selected.map(({ id }) => id).join("\0")}`)
             .digest("hex"),
@@ -565,8 +629,14 @@ export function generateWeeklyPlan(input: WeeklyPlannerInput): WeeklyPlannerResu
     states = uniqueStates;
     if (states.length === 0) break;
   }
-  const best = states
-    .filter(({ selected }) => selected.some(vegetarian))
+  const best = [...states, {
+    selected: witness,
+    used: new Set(witness.map(({ id }) => id)),
+    score: scoreSelection(witness),
+    tieBreak: createHash("sha256").update(`${input.seed}\0${witness.map(({ id }) => id).join("\0")}`).digest("hex"),
+    setKey: witness.map(({ id }) => id).sort().join("\0"),
+  }]
+    .filter(({ selected }) => selected.length === 7 && selected.some(vegetarian))
     .sort((left, right) => compareScores(left.score, right.score)
       || left.tieBreak.localeCompare(right.tieBreak))[0];
 
@@ -586,9 +656,11 @@ export function generateWeeklyPlan(input: WeeklyPlannerInput): WeeklyPlannerResu
       day,
       date: addDays(weekStart, index),
       recipeId: candidate.id,
-      servings: input.context.householdServings,
-      rationale: rationaleFor(profile, candidate),
-      prepLinks: [],
+      servings: servingsFor(candidate, index),
+      rationale: [...rationaleFor(profile, candidate), ...(day === "sun" ? input.context.verifiedPrepLinks ?? [] : [])
+        .filter(({ sourceRecipeId }) => sourceRecipeId === candidate.id)
+        .map(({ note, targetDate }) => `${note} for ${targetDate}`)],
+      prepLinks: (day === "sun" ? input.context.verifiedPrepLinks ?? [] : []).filter(({ sourceRecipeId }) => sourceRecipeId === candidate.id).map(({ id }) => id).sort(),
     };
   });
   return {

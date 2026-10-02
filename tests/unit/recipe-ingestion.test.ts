@@ -80,6 +80,24 @@ describe("recipe ingestion mapping", () => {
     });
   });
 
+  test("normalizes measured ingredients while preserving exact source lines and payload", () => {
+    const rawIngredients = ["  0,5 kg Røde   Linser  ", "250 ml mælk", "2 stk. æg", "ca. 200 g mel"] as const;
+    const raw = { recipeIngredient: rawIngredients };
+    const mapped = mapExtractedRecipeToImport(source, extracted({ rawIngredients, raw }), {
+      requestUrl: "https://recipes.example/recipes/tomato",
+      finalUrl: "https://recipes.example/recipes/tomato",
+      fetchedAt: "2026-09-28T12:00:00.000Z",
+      cacheStatus: "miss",
+    });
+    expect(mapped.ingredients).toEqual([
+      { rawText: rawIngredients[0], normalizedName: "røde linser", quantity: 500, unit: "g", uncertain: false },
+      { rawText: rawIngredients[1], normalizedName: "mælk", quantity: 250, unit: "ml", uncertain: false },
+      { rawText: rawIngredients[2], normalizedName: "æg", quantity: 2, unit: "stk", uncertain: false },
+      { rawText: rawIngredients[3], normalizedName: null, quantity: null, unit: null, uncertain: true },
+    ]);
+    expect(mapped.rawSourcePayload).toEqual(raw);
+  });
+
   test("documents planning-critical completeness as servings, any duration, ingredients, and dietary tags", () => {
     expect(hasPlanningCriticalEvidence(extracted())).toBe(true);
     expect(hasPlanningCriticalEvidence(extracted({ servings: null }))).toBe(false);

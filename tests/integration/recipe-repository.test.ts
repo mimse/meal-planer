@@ -120,12 +120,7 @@ describe("recipe persistence", () => {
     const path = await temporaryDatabasePath();
     const database = openDatabase(path);
 
-    expect(database.query("SELECT version, name FROM schema_migrations ORDER BY version").all()).toEqual([
-      { version: 1, name: "initial configuration" },
-      { version: 2, name: "recipe ingestion persistence" },
-      { version: 3, name: "bounded HTTP cache" },
-      { version: 4, name: "family-aware weekly plans" },
-    ]);
+    expect(database.query("SELECT version, name FROM schema_migrations ORDER BY version").all()).toEqual(migrations.map(({ version, name }) => ({ version, name })));
     expect(database.query(`
       SELECT name
       FROM sqlite_master
@@ -152,16 +147,11 @@ describe("recipe persistence", () => {
     versionOne.close();
 
     const upgraded = openDatabase(path);
-    expect(upgraded.query("SELECT version, name FROM schema_migrations ORDER BY version").all()).toEqual([
-      { version: 1, name: "initial configuration" },
-      { version: 2, name: "recipe ingestion persistence" },
-      { version: 3, name: "bounded HTTP cache" },
-      { version: 4, name: "family-aware weekly plans" },
-    ]);
+    expect(upgraded.query("SELECT version, name FROM schema_migrations ORDER BY version").all()).toEqual(migrations.map(({ version, name }) => ({ version, name })));
     upgraded.close();
 
     const reopened = openDatabase(path);
-    expect(reopened.query("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 4 });
+    expect(reopened.query("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: migrations.length });
     reopened.close();
   });
 

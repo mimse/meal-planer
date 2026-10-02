@@ -11,6 +11,7 @@ export const REVIEW_OVERRIDE_FIELDS = [
   "suitabilityTags",
   "extraMealServings",
   "preference",
+  "ingredients",
   "needsReview",
 ] as const;
 

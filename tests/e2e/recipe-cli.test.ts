@@ -95,6 +95,7 @@ describe("recipe CLI", () => {
       "--cook-minutes", "20",
       "--total-minutes", "30",
       "--extra-meal-servings", "8",
+      "--ingredients-json", JSON.stringify([{ rawText: "2 tomatoes", normalizedName: "tomatoes", quantity: 300, unit: "g", uncertain: false }]),
       "--mark-reviewed", "--json",
     ]);
     expect(reviewed.exitCode, reviewed.stderr).toBe(0);
@@ -111,6 +112,7 @@ describe("recipe CLI", () => {
       totalMinutes: 30,
       extraMealServings: 8,
       needsReview: false,
+      ingredients: [{ rawText: "2 tomatoes", normalizedName: "tomatoes", quantity: 300, unit: "g", uncertain: false }],
     });
 
     const pending = await runCli([

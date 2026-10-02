@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { reviewRecipe } from "../../src/application/recipe-review";
+import { parseRecipeReviewPatch, reviewRecipe } from "../../src/application/recipe-review";
 import { openDatabase } from "../../src/infrastructure/database";
 import { createConfigurationRepositories } from "../../src/infrastructure/configuration-repositories";
 import { createRecipeRepository, type RecipeImport } from "../../src/infrastructure/recipe-repository";
@@ -32,6 +32,46 @@ function incompleteRecipe(): RecipeImport {
 }
 
 describe("reviewRecipe", () => {
+  test("persists reviewed ingredient quantities with exact raw provenance and explicit override marker", () => {
+    const database = openDatabase(":memory:");
+    createConfigurationRepositories(database).recipeSources.upsert({
+      id: "example", name: "Example", baseUrl: "https://recipes.example/", adapter: "jsonld", enabled: true,
+    });
+    const repository = createRecipeRepository(database);
+    const original = repository.import(incompleteRecipe());
+    const ingredients = [{ rawText: original.ingredients[0]!.rawText, normalizedName: "Tomato", quantity: 2, unit: "stk", uncertain: false }];
+    const reviewed = reviewRecipe(database, original.id, parseRecipeReviewPatch({ ingredients }));
+    expect(reviewed.ingredients).toEqual([{ ...ingredients[0]!, normalizedName: "tomato" }]);
+    expect(reviewed.rawSourcePayload).toEqual(original.rawSourcePayload);
+    expect(reviewed.sourceEvidence).toEqual({ url: "https://recipes.example/soup", reviewOverrides: ["ingredients", "needsReview"] });
+    expect(repository.get(original.id)).toEqual(reviewed);
+    database.close();
+  });
+
+  test("rejects invalid reviewed ingredients by the bounded strict repository shape without mutation", () => {
+    const database = openDatabase(":memory:");
+    createConfigurationRepositories(database).recipeSources.upsert({
+      id: "example", name: "Example", baseUrl: "https://recipes.example/", adapter: "jsonld", enabled: true,
+    });
+    const repository = createRecipeRepository(database);
+    const original = repository.import(incompleteRecipe());
+    const valid = { rawText: " 1 tomato ", normalizedName: "tomato", quantity: 1, unit: "stk", uncertain: false };
+    expect(parseRecipeReviewPatch({ ingredients: [valid] })).toEqual({ ingredients: [valid] });
+    for (const ingredients of [
+      [{ ...valid, quantity: 0 }], [{ ...valid, quantity: -1 }], [{ ...valid, quantity: NaN }],
+      [{ ...valid, quantity: Infinity }], [{ ...valid, quantity: 1_000_000_001 }],
+      [{ ...valid, rawText: " " }], [{ ...valid, rawText: "a".repeat(2001) }],
+      [{ ...valid, normalizedName: " " }], [{ ...valid, normalizedName: "a".repeat(301) }],
+      [{ ...valid, unit: " " }], [{ ...valid, unit: "a".repeat(101) }],
+      [{ ...valid, uncertain: "false" }], [{ ...valid, invented: true }], Array(501).fill(valid),
+    ]) {
+      expect(() => reviewRecipe(database, original.id, parseRecipeReviewPatch({ ingredients }))).toThrow();
+      expect(repository.get(original.id)).toEqual(original);
+    }
+    expect(parseRecipeReviewPatch({ ingredients: [{ ...valid, normalizedName: null, quantity: null, unit: null, uncertain: true }] }).ingredients).toHaveLength(1);
+    database.close();
+  });
+
   test("rejects mark-reviewed while planning-critical evidence is incomplete without mutation", () => {
     const database = openDatabase(":memory:");
     createConfigurationRepositories(database).recipeSources.upsert({

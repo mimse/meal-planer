@@ -19,6 +19,8 @@ const REQUIRED_RECIPE_TABLES = [
   "recipe_instructions",
 ] as const;
 const REQUIRED_CACHE_TABLES = ["http_cache"] as const;
+const REQUIRED_PLAN_TABLES = ["weekly_plans", "plan_meals", "meal_history"] as const;
+const REQUIRED_REPLACEMENT_TABLES = ["weekly_recipe_rejections", "plan_meal_revisions", "recipe_prep_links"] as const;
 
 function assertApplicationDatabase(database: Database): void {
   const tableNames = new Set(database
@@ -43,6 +45,11 @@ function assertApplicationDatabase(database: Database): void {
     && REQUIRED_CACHE_TABLES.some((tableName) => !tableNames.has(tableName))
   ) {
     throw new Error("Family configuration does not exist. Run mealplan setup first.");
+  }
+  for (const [version, requiredTables] of [[4, REQUIRED_PLAN_TABLES], [5, REQUIRED_REPLACEMENT_TABLES]] as const) {
+    if (appliedMigrations.some((migration) => migration.version >= version) && requiredTables.some((table) => !tableNames.has(table))) {
+      throw new Error("Family configuration does not exist. Run mealplan setup first.");
+    }
   }
 }
 

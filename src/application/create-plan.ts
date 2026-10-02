@@ -10,6 +10,8 @@ import {
 import { createConfigurationRepositories } from "../infrastructure/configuration-repositories";
 import { createPlanRepository, type WeeklyPlan } from "../infrastructure/plan-repository";
 import { createRecipeRepository } from "../infrastructure/recipe-repository";
+import { createPrepLinkRepository } from "../infrastructure/prep-link-repository";
+import { fetchPlanningDealInputs, type PlanningDealInputs, type PlanningDealsOptions } from "./planning-deals";
 
 const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
   const parsed = new Date(`${value}T00:00:00.000Z`);
@@ -24,6 +26,7 @@ export type CreatePlanOptions = {
   readonly plannedAt: string;
   readonly packageEstimates?: readonly PackageEstimate[];
   readonly dealSignals?: readonly DealSignal[];
+  readonly warnings?: readonly string[];
 };
 
 export class PlanInfeasibleError extends Error {
@@ -97,17 +100,21 @@ export function createPlanDraft(database: Database, options: CreatePlanOptions):
     .map(({ value }) => value);
   const recentSince = addDays(weekStart, -56);
   const planRepository = createPlanRepository(database);
+  const rejectedRecipeIds = new Set(planRepository.listRejectedRecipeIds(weekStart));
+  const prepLinks = createPrepLinkRepository(database).listVerifiedForSunday(addDays(weekStart, 6));
   const generated = generateWeeklyPlan({
     weekStart,
     plannedAt,
     seed,
-    recipes,
+    recipes: recipes.filter(({ id }) => !rejectedRecipeIds.has(id)),
     dayProfiles: family.dayProfiles,
     context: {
       householdServings,
       enabledSourceIds,
       dietaryRestrictions,
       dislikedIngredients,
+      verifiedPrepRecipeIds: new Set(prepLinks.map(({ sourceRecipeId }) => sourceRecipeId)),
+      verifiedPrepLinks: prepLinks,
     },
     scoreContext: {
       householdServings,
@@ -117,8 +124,48 @@ export function createPlanDraft(database: Database, options: CreatePlanOptions):
       preferredStoreIds: new Set(family.preferredStores.map(({ id }) => id)),
       shoppingDate,
       recentRecipeIds: new Set(planRepository.listRecentRecipeIds(recentSince)),
+      prepLinks,
     },
   });
   if (generated.status === "infeasible") throw new PlanInfeasibleError(generated.reasons);
-  return planRepository.saveDraft(generated.plan);
+  const warnings = [...generated.plan.score.warnings, ...(options.warnings ?? [])];
+  if (today > shoppingDate) warnings.push(`The shopping date ${shoppingDate} has passed; check stock and offer validity before shopping`);
+  return planRepository.saveDraft({ ...generated.plan, score: { ...generated.plan.score, warnings: [...new Set(warnings)].sort() } });
+}
+
+/** Provider I/O finishes before the local planner persists anything. */
+export async function createPlanWithDeals(
+  database: Database,
+  options: CreatePlanOptions & { readonly noDeals?: boolean },
+  context: { readonly fetchDeals?: (options: PlanningDealsOptions) => Promise<PlanningDealInputs> } = {},
+): Promise<WeeklyPlan> {
+  seedSchema.parse(options.seed);
+  const plannedAt = plannedAtSchema.parse(options.plannedAt);
+  const weekStart = resolvePlanWeekStart(options.week, localDateInDenmark(new Date(plannedAt)));
+  let inputs: PlanningDealInputs;
+  if (options.noDeals === true) {
+    inputs = { dealSignals: [], packageEstimates: [], warnings: ["Deal lookup disabled; package and offer estimates unavailable"] };
+  } else {
+    const family = readFamilyConfiguration(database);
+    const enabledSourceIds = new Set(createConfigurationRepositories(database).recipeSources.list()
+      .filter(({ enabled }) => enabled).map(({ id }) => id));
+    try {
+      inputs = await (context.fetchDeals ?? fetchPlanningDealInputs)({
+        recipes: createRecipeRepository(database).list({ limit: 500 })
+          .filter((recipe) => enabledSourceIds.has(recipe.sourceId) && !recipe.needsReview && recipe.preference !== "disliked"),
+        preferredStores: family.preferredStores,
+        pantry: readPantry(database),
+        shoppingDate: addDays(weekStart, -2),
+      });
+    } catch (error) {
+      inputs = { dealSignals: [], packageEstimates: [], warnings: [
+        `Planning continues without deals: ${error instanceof Error ? error.message.slice(0, 300) : "provider unavailable"}`,
+      ] };
+    }
+  }
+  return createPlanDraft(database, {
+    ...options, week: weekStart,
+    dealSignals: inputs.dealSignals, packageEstimates: inputs.packageEstimates,
+    warnings: [...(options.warnings ?? []), ...inputs.warnings],
+  });
 }

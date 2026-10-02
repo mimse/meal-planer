@@ -478,6 +478,7 @@ export type TilbudstroldenClientOptions = {
   args: string[];
   cwd: string;
   dataPath: string;
+  timeoutMs?: number;
 };
 
 export type CompatibilityResult = {
@@ -773,11 +774,13 @@ type TilbudstroldenSessionOptions = {
   readonly args: readonly string[];
   readonly cwd: string;
   readonly dataPath: string;
+  readonly timeoutMs: number;
 };
 
 type TilbudstroldenSession = {
   client: Client;
   transport: StdioClientTransport;
+  abort: AbortController;
 };
 
 export class TilbudstroldenClient implements AsyncDisposable {
@@ -793,6 +796,7 @@ export class TilbudstroldenClient implements AsyncDisposable {
       args: Object.freeze([...options.args]),
       cwd: options.cwd,
       dataPath: options.dataPath,
+      timeoutMs: z.number().int().positive().max(120_000).parse(options.timeoutMs ?? 10_000),
     });
   }
 
@@ -814,12 +818,12 @@ export class TilbudstroldenClient implements AsyncDisposable {
     transport.stderr?.on("data", () => {
       // Drain server diagnostics so a full stderr pipe cannot deadlock the MCP process.
     });
-    return { client, transport };
+    return { client, transport, abort: new AbortController() };
   }
 
   async checkCompatibility(): Promise<CompatibilityResult> {
     const client = await this.#connect();
-    const { tools } = await client.listTools();
+    const { tools } = await client.listTools({}, this.#requestOptions());
     const server = client.getServerVersion();
 
     return evaluateCompatibility(
@@ -828,12 +832,58 @@ export class TilbudstroldenClient implements AsyncDisposable {
     );
   }
 
+  #requestOptions() {
+    return { timeout: this.#options.timeoutMs, ...(this.#session ? { signal: this.#session.abort.signal } : {}) };
+  }
+
+  async #metadataCall(name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const client = await this.#connect();
+    const result = await client.callTool({ name, arguments: args }, undefined, this.#requestOptions());
+    if (!isRecord(result) || result.isError === true) throw new TilbudstroldenBoundaryError(`${name} returned an MCP error`);
+    if (!Array.isArray(result.content)) throw new TilbudstroldenBoundaryError(`${name} returned invalid content`);
+    return result;
+  }
+
+  async listStores(options: { all: boolean }): Promise<StoreDirectoryEntry[]> {
+    const result = await this.#metadataCall("list_stores", options);
+    // The pinned list_stores tool is text-only. Prefer structured content if a future compatible patch supplies it.
+    const schema = z.array(z.object({ name: z.string().min(1).max(200), dealerId: z.string().min(1).max(200) })).max(2_000);
+    if (result.structuredContent !== undefined) {
+      const data = isRecord(result.structuredContent) ? result.structuredContent.stores : undefined;
+      return schema.parse(data);
+    }
+    const text = (result.content as unknown[]).flatMap(item => isRecord(item) && item.type === "text" && typeof item.text === "string" ? [item.text] : []).join("\n");
+    if (text.length > 500_000) throw new TilbudstroldenBoundaryError("list_stores response is oversized");
+    const stores = schema.parse(parseStoreDirectory(text));
+    if (stores.length === 0) throw new TilbudstroldenBoundaryError("list_stores returned no usable directory");
+    return stores;
+  }
+
+  async updateHousehold(options: { country: string; people: []; stores: Array<StoreDirectoryEntry & { priority: number }>; defaultServings: number }): Promise<void> {
+    const args = z.object({ country: z.literal("DK"), people: z.array(z.never()).max(0),
+      stores: z.array(z.object({ name: z.string().min(1).max(200), dealerId: z.string().min(1).max(200), priority: z.number().int().positive().max(100) })).max(100),
+      defaultServings: z.number().positive().max(500) }).parse(options);
+    await this.#metadataCall("update_household", args);
+  }
+
+  async updatePantry(options: { add: string[]; remove: string[] }): Promise<void> {
+    const entries = z.array(z.string().min(1).max(500)).max(2_000);
+    await this.#metadataCall("update_pantry", z.object({ add: entries, remove: entries }).parse(options));
+  }
+
+  async addRecipe(options: { name: string; servings: number; complexity: "quick" | "medium" | "slow"; cuisineType: string; proteinType: string; ingredients: Array<{ name: string; quantity: string; searchTerms: string[] }> }): Promise<void> {
+    const text = z.string().min(1).max(2_000);
+    const args = z.object({ name: text, servings: z.number().positive().max(500), complexity: z.enum(["quick", "medium", "slow"]), cuisineType: text, proteinType: text,
+      ingredients: z.array(z.object({ name: text, quantity: text, searchTerms: z.array(text).min(1).max(20) })).min(1).max(200) }).parse(options);
+    await this.#metadataCall("add_recipe", args);
+  }
+
   async scoreRecipes(options: ScoreRecipesOptions = {}): Promise<ScoreRecipesResponse> {
     const client = await this.#connect();
     const result = await client.callTool({
       name: "score_recipes",
       arguments: options,
-    });
+    }, undefined, this.#requestOptions());
     const receivedAt = new Date().toISOString();
     return parseScoreRecipesResponse(result, receivedAt);
   }
@@ -845,7 +895,7 @@ export class TilbudstroldenClient implements AsyncDisposable {
     const result = await client.callTool({
       name: "generate_shopping_list",
       arguments: options,
-    });
+    }, undefined, this.#requestOptions());
     const receivedAt = new Date().toISOString();
     return parseGenerateShoppingListResponse(result, receivedAt);
   }
@@ -861,10 +911,11 @@ export class TilbudstroldenClient implements AsyncDisposable {
     const session = this.#createSession();
     this.#session = session;
     try {
-      await session.client.connect(session.transport);
+      await session.client.connect(session.transport, { timeout: this.#options.timeoutMs, signal: session.abort.signal });
       this.#connected = true;
       return session.client;
     } catch (error) {
+      await session.transport.close().catch(() => {});
       if (this.#session === session) this.#session = undefined;
       throw error;
     } finally {
@@ -882,6 +933,7 @@ export class TilbudstroldenClient implements AsyncDisposable {
   }
 
   async #finishClose(): Promise<void> {
+    this.#session?.abort.abort(new Error("TilbudsTrolden client closed"));
     try {
       await this.#connectionPromise;
     } catch {

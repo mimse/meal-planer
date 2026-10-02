@@ -15,7 +15,7 @@ import type { SetupAnswers } from "./commands/setup";
 import { runSourceTest } from "./application/test-source";
 import { runSourceSync } from "./application/source-sync";
 import {
-  createPlanDraft,
+  createPlanWithDeals,
   localDateInDenmark,
   resolvePlanWeekStart,
 } from "./application/create-plan";
@@ -42,7 +42,9 @@ import {
 import { createConfigurationRepositories } from "./infrastructure/configuration-repositories";
 import { resolveDatabasePath } from "./infrastructure/database-path";
 import { createPlanRepository, type WeeklyPlan } from "./infrastructure/plan-repository";
+import { createPrepLinkRepository, parsePrepLinkInput } from "./infrastructure/prep-link-repository";
 import { ClackPromptAdapter } from "./presentation/prompts";
+import { registerPlanEditCommands } from "./presentation/plan-edit-commands";
 
 const program = new Command()
   .name("mealplan")
@@ -512,6 +514,7 @@ recipes.command("review")
   .option("--total-minutes <n>", "set total duration", collectAtMostTwo, [])
   .option("--clear-total-minutes", "clear total duration")
   .option("--extra-meal-servings <n>", "set servings produced beyond the planned dinner", collectAtMostTwo, [])
+  .option("--ingredients-json <json>", "replace reviewed ingredient evidence with a JSON array", collectAtMostTwo, [])
   .option("--mark-reviewed", "clear needs-review only when planning-critical evidence is complete")
   .option("--json", "emit stable JSON")
   .action((recipeId: string, options: {
@@ -533,6 +536,7 @@ recipes.command("review")
     totalMinutes: string[];
     clearTotalMinutes?: boolean;
     extraMealServings: string[];
+    ingredientsJson: string[];
     markReviewed?: boolean;
     json?: boolean;
   }) => {
@@ -544,6 +548,7 @@ recipes.command("review")
     const cookMinutes = singletonOption(options.cookMinutes, "--cook-minutes");
     const totalMinutes = singletonOption(options.totalMinutes, "--total-minutes");
     const extraMealServings = singletonOption(options.extraMealServings, "--extra-meal-servings");
+    const ingredientsJson = singletonOption(options.ingredientsJson, "--ingredients-json");
     rejectSetClearConflict(options.dietaryTag.length > 0, options.clearDietaryTags, "dietary tags");
     rejectSetClearConflict(options.suitabilityTag.length > 0, options.clearSuitabilityTags, "suitability tags");
     rejectSetClearConflict(options.cuisineTag.length > 0, options.clearCuisineTags, "cuisine tags");
@@ -584,8 +589,10 @@ recipes.command("review")
       }),
       ...(options.markReviewed === true ? { markReviewed: true } : {}),
     };
-    if (Object.keys(patchInput).length === 0) throw new Error("At least one recipe review option is required");
-    const patch = parseRecipeReviewPatch(patchInput);
+    if (Object.keys(patchInput).length === 0 && ingredientsJson === undefined) throw new Error("At least one recipe review option is required");
+    const patch = parseRecipeReviewPatch({ ...patchInput,
+      ...(ingredientsJson === undefined ? {} : { ingredients: parseJson(ingredientsJson, "--ingredients-json") }),
+    });
     const database = openExistingDatabase(databasePath());
     try {
       const reviewed = reviewRecipe(database, parsedRecipeId, patch);
@@ -617,14 +624,50 @@ recipes
     console.log(`${recipe.title}\n${recipe.canonicalUrl}`);
   });
 
-const plan = program.command("plan").description("Create, inspect, and accept weekly meal plans");
+recipes.command("prep-link")
+  .description("Link measured preparation or leftovers to a saved future meal")
+  .argument("<recipe-id>", "source recipe")
+  .requiredOption("--target-meal <id>", "future stable meal id", collectAtMostTwo, [])
+  .requiredOption("--ingredient <name>", "normalized ingredient", collectAtMostTwo, [])
+  .requiredOption("--quantity <n>", "measured quantity", collectAtMostTwo, [])
+  .requiredOption("--unit <unit>", "g, ml, or stk", collectAtMostTwo, [])
+  .requiredOption("--note <text>", "explicit preparation task", collectAtMostTwo, [])
+  .option("--kind <kind>", "prep or leftover", collectAtMostTwo, [])
+  .option("--json", "emit stable JSON")
+  .action((recipeId: string, options: { targetMeal: string[]; ingredient: string[]; quantity: string[]; unit: string[]; note: string[]; kind: string[]; json?: boolean }) => {
+    const input = parsePrepLinkInput({ sourceRecipeId: parseRecipeId(recipeId),
+      targetMealId: singletonOption(options.targetMeal, "--target-meal"),
+      normalizedIngredient: singletonOption(options.ingredient, "--ingredient"),
+      quantity: positiveNumber(singletonOption(options.quantity, "--quantity")!, "--quantity"),
+      unit: singletonOption(options.unit, "--unit"),
+      note: singletonOption(options.note, "--note"), kind: singletonOption(options.kind, "--kind") ?? "prep",
+    });
+    const database = openExistingDatabase(databasePath());
+    try {
+      const link = createPrepLinkRepository(database).add(input);
+      if (options.json) process.stdout.write(`${JSON.stringify(link, null, 2)}\n`);
+      else console.log(`${link.id}: ${link.note} → ${link.targetDate} [${link.targetMealId}]`);
+    } finally { database.close(); }
+  });
+
+recipes.command("remove-prep-link")
+  .argument("<link-id>", "unreferenced prep link id")
+  .action((id: string) => {
+    const database = openExistingDatabase(databasePath());
+    try { createPrepLinkRepository(database).remove(id); console.log(`Removed ${id}`); }
+    finally { database.close(); }
+  });
+
+const plan = program.command("plan").description("Create, inspect, accept, and edit weekly meal plans");
+registerPlanEditCommands(plan, databasePath);
 
 plan.command("create")
   .description("Create and save a deterministic family-aware draft")
   .option("--week <date|next>", "date in the requested week, or next", collectAtMostTwo, [])
   .option("--seed <value>", "deterministic selection seed", collectAtMostTwo, [])
+  .option("--no-deals", "skip live deals and package estimates")
   .option("--json", "emit stable JSON")
-  .action((options: { week: string[]; seed: string[]; json?: boolean }) => {
+  .action(async (options: { week: string[]; seed: string[]; deals: boolean; json?: boolean }) => {
     const requestedWeek = singletonOption(options.week, "--week");
     const requestedSeed = singletonOption(options.seed, "--seed");
     const plannedAt = new Date().toISOString();
@@ -633,7 +676,7 @@ plan.command("create")
     if (seed.length === 0 || seed.length > 500) throw new Error("--seed must contain 1-500 characters");
     const database = openExistingDatabase(databasePath());
     try {
-      const created = createPlanDraft(database, { week: weekStart, seed, plannedAt });
+      const created = await createPlanWithDeals(database, { week: weekStart, seed, plannedAt, noDeals: !options.deals });
       if (options.json) process.stdout.write(`${JSON.stringify(created, null, 2)}\n`);
       else {
         const recipesById = new Map(createRecipeRepository(database).list({ limit: 500 })

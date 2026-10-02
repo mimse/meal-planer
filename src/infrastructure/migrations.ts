@@ -230,6 +230,44 @@ export const migrations: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 5,
+    name: "atomic meal replacement and preparation links",
+    up(database) {
+      database.exec(`
+        CREATE TABLE weekly_recipe_rejections (
+          week_start TEXT NOT NULL CHECK (length(week_start) = 10),
+          recipe_id TEXT NOT NULL REFERENCES recipes(id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+          recorded_at TEXT NOT NULL CHECK (length(recorded_at) BETWEEN 20 AND 30),
+          PRIMARY KEY (week_start, recipe_id)
+        ) STRICT;
+        CREATE TABLE plan_meal_revisions (
+          id INTEGER PRIMARY KEY,
+          plan_id TEXT NOT NULL REFERENCES weekly_plans(id) ON DELETE CASCADE ON UPDATE RESTRICT,
+          plan_meal_id TEXT NOT NULL REFERENCES plan_meals(id) ON DELETE CASCADE ON UPDATE RESTRICT,
+          original_hash TEXT NOT NULL CHECK (length(original_hash) = 64),
+          replacement_hash TEXT NOT NULL CHECK (length(replacement_hash) = 64),
+          original_recipe_id TEXT NOT NULL REFERENCES recipes(id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+          replacement_recipe_id TEXT NOT NULL REFERENCES recipes(id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+          rejection TEXT NOT NULL CHECK (rejection IN ('not-this-week', 'disliked', 'none')),
+          recorded_at TEXT NOT NULL CHECK (length(recorded_at) BETWEEN 20 AND 30)
+        ) STRICT;
+        CREATE INDEX plan_meal_revisions_meal ON plan_meal_revisions(plan_meal_id, id);
+        CREATE TABLE recipe_prep_links (
+          id TEXT PRIMARY KEY,
+          source_recipe_id TEXT NOT NULL REFERENCES recipes(id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+          target_meal_id TEXT NOT NULL REFERENCES plan_meals(id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+          kind TEXT NOT NULL CHECK (kind IN ('prep', 'leftover')),
+          normalized_ingredient TEXT NOT NULL CHECK (length(trim(normalized_ingredient)) > 0),
+          quantity REAL NOT NULL CHECK (quantity > 0 AND quantity <= 1000000000),
+          unit TEXT NOT NULL CHECK (length(trim(unit)) > 0),
+          note TEXT NOT NULL
+        ) STRICT;
+        CREATE INDEX recipe_prep_links_source ON recipe_prep_links(source_recipe_id);
+        CREATE INDEX recipe_prep_links_target ON recipe_prep_links(target_meal_id);
+      `);
+    },
+  },
 ];
 
 function validateMigrations(pendingMigrations: readonly Migration[]): void {

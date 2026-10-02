@@ -15,7 +15,18 @@ import {
   type ReviewOverrideField,
 } from "./recipe-review-overrides";
 
+// Mirrors the repository's strict ingredient input shape. Repository import
+// remains the final validation boundary (including normalized-name expansion).
+const ingredientReviewSchema = z.object({
+  rawText: z.string().max(2_000).refine((value) => value.trim().length > 0),
+  normalizedName: z.string().max(300).refine((value) => value.trim().length > 0).nullable(),
+  quantity: z.number().finite().positive().max(1_000_000_000).nullable(),
+  unit: z.string().max(100).refine((value) => value.trim().length > 0).nullable(),
+  uncertain: z.boolean(),
+}).strict();
+
 const reviewPatchSchema = z.object({
+  ingredients: z.array(ingredientReviewSchema).max(500).optional(),
   dietaryTags: z.array(z.enum(DIETARY_TAGS)).max(50).optional(),
   suitabilityTags: z.array(z.enum(SUITABILITY_TAGS)).max(SUITABILITY_TAGS.length).optional(),
   cuisineTags: z.array(z.string().trim().min(1).max(64)).max(50).optional(),
@@ -74,6 +85,7 @@ export function reviewRecipe(database: Database, recipeId: string, input: Recipe
     if (current === null) throw new Error(`Recipe does not exist: ${recipeId}`);
     const candidate: RecipeImport = {
       ...mutableRecipeImport(current),
+      ...(patch.ingredients === undefined ? {} : { ingredients: patch.ingredients }),
       ...(patch.dietaryTags === undefined ? {} : { dietaryTags: patch.dietaryTags }),
       ...(patch.suitabilityTags === undefined ? {} : { suitabilityTags: patch.suitabilityTags }),
       ...(patch.cuisineTags === undefined ? {} : { cuisineTags: patch.cuisineTags }),
@@ -94,7 +106,7 @@ export function reviewRecipe(database: Database, recipeId: string, input: Recipe
     candidate.needsReview = patch.markReviewed === true ? false : current.needsReview || !complete;
     const editableFields = [
       "servings", "prepMinutes", "cookMinutes", "totalMinutes", "cuisineTags", "proteinTag",
-      "dietaryTags", "suitabilityTags", "extraMealServings", "preference",
+      "dietaryTags", "suitabilityTags", "extraMealServings", "preference", "ingredients",
     ] as const satisfies readonly Exclude<ReviewOverrideField, "needsReview">[];
     const changedFields: ReviewOverrideField[] = editableFields.filter((field) => patch[field] !== undefined);
     changedFields.push("needsReview");

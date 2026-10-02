@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { normalizeIngredient } from "../domain/ingredients";
 import type { ExtractedRecipe } from "../adapters/recipes/extraction";
 import { extractRecipeWithAdapter } from "../adapters/recipes/registry";
 import type { RecipeFetchDependencies } from "../adapters/recipes/fetch";
@@ -163,13 +164,7 @@ export function mapExtractedRecipeToImport(
       extractedSourceUrl: extracted.sourceUrl,
       extractedCanonicalUrl: extracted.canonicalUrl,
     },
-    ingredients: extracted.rawIngredients.map((rawText) => ({
-      rawText,
-      normalizedName: null,
-      quantity: null,
-      unit: null,
-      uncertain: true,
-    })),
+    ingredients: extracted.rawIngredients.map(normalizeIngredient),
     instructions: [...extracted.instructions],
   };
 }

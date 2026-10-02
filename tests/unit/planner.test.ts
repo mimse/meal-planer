@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { DIETARY_TAGS } from "../../src/domain/recipe";
 import {
   evaluateRecipeForDay,
   generateWeeklyPlan,
@@ -52,6 +53,23 @@ const dayProfiles: readonly PlannerDayProfile[] = [
 ];
 
 describe("planner hard constraints", () => {
+  test("recognizes every canonical dietary tag as a required classification", () => {
+    for (const tag of DIETARY_TAGS) {
+      const missing = recipe({ dietaryTags: tag === "vegetarian" ? ["low-salt"] : ["vegetarian"] });
+      expect(evaluateRecipeForDay(missing, dayProfiles[0]!, { ...context, dietaryRestrictions: [tag] }).eligible).toBe(false);
+    }
+  });
+
+  test("splits combined dietary classifications before checking every required tag", () => {
+    const unsafe = recipe({ dietaryTags: ["low-salt"], ingredients: [{ rawText: "pork and wheat", normalizedName: "pork", quantity: 100, unit: "g", uncertain: false }] });
+    for (const dietaryRestrictions of [["Vegetarian", "gluten-free"], ["Vegetarian, gluten-free"], ["Vegetarian; gluten-free"]]) {
+      expect(evaluateRecipeForDay(unsafe, dayProfiles[0]!, { ...context, dietaryRestrictions }).eligible).toBe(false);
+    }
+    const safe = recipe({ dietaryTags: ["vegetarian", "gluten-free"] });
+    expect(evaluateRecipeForDay(safe, dayProfiles[0]!, { ...context, dietaryRestrictions: ["Vegetarian, gluten-free; no peanuts"] }).eligible).toBe(true);
+    expect(evaluateRecipeForDay(recipe({ dietaryTags: ["vegetarian"] }), dayProfiles[0]!, { ...context, dietaryRestrictions: ["Vegetarian, gluten-free"] }).eligible).toBe(false);
+  });
+
   test("rejects recipes that cannot prove configured day constraints", () => {
     const monday = {
       day: "mon" as const,
@@ -143,10 +161,100 @@ describe("planner hard constraints", () => {
       friday,
       { ...context, dietaryRestrictions: ["Peanuts"] },
     ).reasons).toContain("contains restricted ingredient: Peanuts");
+    expect(evaluateRecipeForDay(recipe({ ingredients: [{ rawText: "50 g peanuts", normalizedName: "nuts", quantity: 50, unit: "g", uncertain: false }] }), friday,
+      { ...context, dietaryRestrictions: ["No peanuts, tree nuts; sesame"] }).eligible).toBe(false);
+    expect(evaluateRecipeForDay(recipe({ ingredients: [{ rawText: "100 g capers", normalizedName: "capers", quantity: 100, unit: "g", uncertain: false }] }), friday,
+      { ...context, dislikedIngredients: ["Olives, capers; anchovies"] }).eligible).toBe(false);
   });
 });
 
 describe("weekly planner", () => {
+  test("does not attach or credit Sunday prep reservations to a weekday occurrence", () => {
+    const recipes = Array.from({ length: 7 }, (_, index) => recipe({ id: `recipe:${index.toString(16).repeat(64)}`, totalMinutes: index === 0 ? 55 : 25 }));
+    const prepLinks = [{ id: `prep:${"a".repeat(64)}`, sourceRecipeId: recipes[0]!.id, targetMealId: `meal:${"b".repeat(64)}`, targetDate: "2026-10-12", kind: "prep" as const, normalizedIngredient: "carrots", quantity: 200, unit: "g", note: "Sunday-only prep" }];
+    const result = generateWeeklyPlan({
+      weekStart: "2026-10-05", plannedAt: "2026-10-01T12:00:00.000Z", seed: "weekday-prep", recipes,
+      dayProfiles: dayProfiles.map((profile) => ({ ...profile, maxTotalMinutes: profile.day === "mon" ? 60 : 30 })),
+      context: { ...context, verifiedPrepRecipeIds: new Set([recipes[0]!.id]), verifiedPrepLinks: prepLinks },
+      scoreContext: { householdServings: 4, pantryItems: [], packageEstimates: [{ normalizedIngredient: "carrots", unit: "g", packageQuantity: 1000, perishability: "perishable" }], dealSignals: [], preferredStoreIds: new Set(), shoppingDate: "2026-10-03", recentRecipeIds: new Set(), prepLinks },
+    });
+    if (result.status !== "generated") throw new Error("Expected a feasible week");
+    expect(result.plan.meals[0]!.recipeId).toBe(recipes[0]!.id);
+    expect(result.plan.meals[0]!.prepLinks).toEqual([]);
+    expect(result.plan.score.predictedRemainders[0]!.demand).toBe(4000);
+    expect(result.plan.score.explanations.join("\n")).not.toContain("Sunday-only prep");
+  });
+
+  test("converts measured pantry kg and fractions to canonical ingredient units", () => {
+    const score = scoreWeeklyRecipes([recipe()], {
+      householdServings: 4, pantryItems: [{ normalizedName: "carrots", quantity: "1/2 kg" }],
+      packageEstimates: [{ normalizedIngredient: "carrots", unit: "g", packageQuantity: 1000, perishability: "perishable" }],
+      dealSignals: [], preferredStoreIds: new Set(), shoppingDate: "2026-10-03", recentRecipeIds: new Set(),
+    });
+    expect(score.predictedRemainders[0]!.pantryUsed).toBe(500);
+    expect(score.predictedRemainders[0]!.packageCount).toBe(0);
+    expect(score.pantryIngredientCount).toBe(1);
+  });
+
+  test("avoids recent repetition before rewarding favorites when waste and deals tie", () => {
+    const recipes = Array.from({ length: 8 }, (_, index) => recipe({ id: `recipe:${index.toString(16).repeat(64)}`, preference: index === 7 ? "favorite" : "neutral" }));
+    const result = generateWeeklyPlan({ weekStart: "2026-10-05", plannedAt: "2026-10-01T12:00:00.000Z", seed: "history", recipes, dayProfiles, context,
+      scoreContext: { householdServings: 4, pantryItems: [], packageEstimates: [], dealSignals: [], preferredStoreIds: new Set(), shoppingDate: "2026-10-03", recentRecipeIds: new Set([recipes[7]!.id]) },
+    });
+    expect(result.status).toBe("generated");
+    if (result.status !== "generated") throw new Error("Expected generated week");
+    expect(result.plan.meals.map(({ recipeId }) => recipeId)).not.toContain(recipes[7]!.id);
+  });
+
+  test("persists explicit prep evidence and scores production for verified later consumption", () => {
+    const recipes = Array.from({ length: 7 }, (_, index) => recipe({ id: `recipe:${index.toString(16).repeat(64)}`, extraMealServings: 0,
+      suitabilityTags: index === 6 ? ["prepAhead"] : ["quick", "keepWarm", "reheatFriendly"],
+    }));
+    const prepLinks = [{ id: `prep:${"a".repeat(64)}`, sourceRecipeId: recipes[6]!.id, targetMealId: `meal:${"b".repeat(64)}`, targetDate: "2026-10-12", kind: "prep" as const, normalizedIngredient: "carrots", quantity: 200, unit: "g", note: "Chop carrots for Monday" }];
+    const result = generateWeeklyPlan({ weekStart: "2026-10-05", plannedAt: "2026-10-01T12:00:00.000Z", seed: "prep", recipes, dayProfiles,
+      context: { ...context, verifiedPrepRecipeIds: new Set([recipes[6]!.id]), verifiedPrepLinks: prepLinks },
+      scoreContext: { householdServings: 4, pantryItems: [], packageEstimates: [{ normalizedIngredient: "carrots", unit: "g", packageQuantity: 1000, perishability: "perishable" }], dealSignals: [], preferredStoreIds: new Set(), shoppingDate: "2026-10-03", recentRecipeIds: new Set(), prepLinks },
+    });
+    expect(result.status).toBe("generated");
+    if (result.status !== "generated") throw new Error("Expected prep week");
+    expect(result.plan.meals[6]!.prepLinks).toEqual([prepLinks[0]!.id]);
+    expect(result.plan.meals[6]!.rationale).not.toContain("provides 0 extra serving(s)");
+    expect(result.plan.score.predictedRemainders[0]!.demand).toBe(3700);
+    expect(result.plan.score.explanations.join("\n")).toContain("Chop carrots for Monday");
+  });
+
+  test("requires verified future prep links and includes batch servings in demand", () => {
+    const sunday = dayProfiles[6]!;
+    const prepRecipe = recipe({ extraMealServings: 0, suitabilityTags: ["prepAhead"] });
+    expect(evaluateRecipeForDay(prepRecipe, sunday, context).eligible).toBe(false);
+    expect(evaluateRecipeForDay(prepRecipe, sunday, { ...context, verifiedPrepRecipeIds: new Set([prepRecipe.id]) }).eligible).toBe(true);
+    expect(evaluateRecipeForDay(prepRecipe, { ...sunday, prepLinkSatisfiesMinimum: false }, { ...context, verifiedPrepRecipeIds: new Set([prepRecipe.id]) }).eligible).toBe(false);
+    const recipes = Array.from({ length: 7 }, (_, index) => recipe({ id: `recipe:${index.toString(16).repeat(64)}` }));
+    const result = generateWeeklyPlan({ weekStart: "2026-10-05", plannedAt: "2026-10-01T12:00:00.000Z", seed: "yield", recipes, dayProfiles, context });
+    expect(result.status).toBe("generated");
+    if (result.status !== "generated") throw new Error("Expected generated week");
+    expect(result.plan.meals[6]!.servings).toBe(8);
+    const score = scoreWeeklyRecipes(recipes, {
+      householdServings: 4, pantryItems: [], packageEstimates: [{ normalizedIngredient: "carrots", unit: "g", packageQuantity: 1000, perishability: "perishable" }], dealSignals: [], preferredStoreIds: new Set(), shoppingDate: "2026-10-03", recentRecipeIds: new Set(), recipeServings: new Map(result.plan.meals.map((meal) => [meal.recipeId, meal.servings])),
+    });
+    expect(score.predictedRemainders[0]!.demand).toBe(4000);
+  });
+
+  test("keeps a feasible vegetarian week even when the scoring beam drops the only vegetarian", () => {
+    const recipes = Array.from({ length: 15 }, (_, index) => recipe({
+      id: `recipe:${index.toString(16).padStart(64, "0")}`,
+      title: `Candidate ${index}`,
+      dietaryTags: index === 14 ? ["vegetarian"] : ["low-salt"],
+      ingredients: [{ rawText: "100 g vegetables", normalizedName: index === 14 ? "specialty" : "carrots", quantity: 100, unit: "g", uncertain: false }],
+    }));
+    const result = generateWeeklyPlan({ weekStart: "2026-10-05", plannedAt: "2026-10-01T12:00:00.000Z", seed: "feasibility", recipes, dayProfiles, context });
+    expect(result.status).toBe("generated");
+    if (result.status !== "generated") throw new Error("Expected feasible week");
+    expect(result.plan.meals).toHaveLength(7);
+    expect(result.plan.meals.some(({ recipeId }) => recipeId === recipes[14]!.id)).toBe(true);
+    expect(generateWeeklyPlan({ weekStart: "2026-10-05", plannedAt: "2026-10-01T12:00:00.000Z", seed: "feasibility", recipes: [...recipes].reverse(), dayProfiles, context })).toEqual(result);
+  });
+
   test("aggregates ingredients, pantry use, package remainders, and reuse explanations", () => {
     const recipes = [0, 1].map((index) => recipe({
       id: `recipe:${index.toString(16).repeat(64)}`,
