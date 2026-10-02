@@ -175,10 +175,15 @@ export async function fetchPlanningDealInputs(options: PlanningDealsOptions): Pr
         || response.matchedRecipes.length !== 1 || response.matchedRecipes[0] !== name) throw new Error("invalid recipe identity or currency in provider response");
       const seen = new Set<string>();
       for (const item of response.items) {
-        const key = normalize(item.name);
-        if (seen.has(key) || !recipe.ingredients.some(ingredient => normalize(ingredient.normalizedName ?? ingredient.rawText) === key)
-          || item.sourceRecipes.length !== 1 || item.sourceRecipes[0] !== name
-          || item.contributions.some(contribution => contribution.recipeName !== name)) throw new Error("invalid ingredient association or duplicate item");
+        // Provider identity is lowercase only; raw whitespace remains significant.
+        const key = item.name.toLowerCase();
+        // The provider emits one source/contribution for each submitted ingredient
+        // line, not one per distinct recipe. Repeated lines are valid source evidence.
+        const occurrences = recipe.ingredients.filter(ingredient => (ingredient.normalizedName ?? ingredient.rawText).toLowerCase() === key).length;
+        if (seen.has(key) || occurrences === 0
+          || item.sourceRecipes.length !== occurrences || item.sourceRecipes.some(source => source !== name)
+          || item.contributions.length !== occurrences
+          || item.contributions.some(contribution => contribution.recipeName !== name || contribution.recipeServings !== recipe.servings)) throw new Error("invalid ingredient association or duplicate item");
         seen.add(key);
         if (item.deal && item.deal.currency !== "DKK") throw new Error("invalid offer currency");
         if (item.deal) { offerDate(item.deal.validFrom); offerDate(item.deal.validUntil); }
@@ -195,7 +200,7 @@ export async function fetchPlanningDealInputs(options: PlanningDealsOptions): Pr
         if (validUntil < options.shoppingDate) { warn("expired before shopping date"); continue; }
         if (validFrom > options.shoppingDate) { warn("future offer after shopping date"); continue; }
         result.dealSignals.push({ recipeId: recipe.id, storeId: store.localId, value: 1 / recipe.ingredients.length, validUntil, confidence: "high" });
-        const ingredient = recipe.ingredients.find(ingredient => normalize(ingredient.normalizedName ?? ingredient.rawText) === normalize(item.name))!;
+        const ingredient = recipe.ingredients.find(ingredient => (ingredient.normalizedName ?? ingredient.rawText).toLowerCase() === item.name.toLowerCase())!;
         const packSize = item.purchase?.packSize ?? item.deal.quantity;
         const packUnit = item.purchase?.unitNeeded ?? item.deal.unit;
         if (ingredient.uncertain || !ingredient.normalizedName || !ingredient.unit || !packSize || !packUnit) {

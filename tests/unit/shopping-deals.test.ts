@@ -195,10 +195,11 @@ test("same-name different-unit purchases remain unmatched rather than guessed", 
   const items = ingredients();
   items.push({ ...items[0]!, key: "carrots:stk", unit: "stk", requiredQuantity: 7, preparedDeduction: 0, pantryDeduction: 0, purchaseQuantity: 7,
     contributions: items[0]!.contributions.map(c => ({ ...c, quantity: 1, unit: "stk", preparedDeduction: 0 })) });
-  client.generateShoppingList = async args => ({ ...response(args.recipes), items: [dealItem(args.recipes)] });
+  client.generateShoppingList = async args => ({ ...response(args.recipes), items: [dealItem([...args.recipes, ...args.recipes])] });
   const result = await fetchShoppingDealMatches({ ...options, items, client });
   expect(result.matches).toEqual([]);
   expect(result.warnings.join(" ")).toContain("ambiguous");
+  expect(result.warnings.join(" ")).not.toContain("offline");
 });
 test("uncertain raw lines are preserved explicitly and never auto-priced", async () => {
   const { client, calls } = fake();
@@ -216,6 +217,40 @@ test("uncertain raw lines are preserved explicitly and never auto-priced", async
   expect(result.matches.map(match => match.itemKey)).toEqual(["carrots:g"]);
   expect(result.warnings.join(" ")).toContain("existing local warning");
   expect(result.warnings.join(" ")).toContain("uncertain");
+});
+test("repeated raw ingredients in one meal do not discard unrelated live offers", async () => {
+  const { client, calls } = fake();
+  const items = ingredients();
+  const contribution = items[0]!.contributions[0]!;
+  items.push({ key: "mozzarella", normalizedIngredient: null, unit: null, requiredQuantity: null, purchaseQuantity: null,
+    pantryDeduction: 0, preparedDeduction: 0, warnings: [],
+    contributions: Array.from({ length: 2 }, () => ({ ...contribution, rawText: "1 pk. frisk mozzarella", quantity: null, unit: null, preparedDeduction: 0 })) });
+  client.generateShoppingList = async args => {
+    const repeated = dealItem([args.recipes[0]!, args.recipes[0]!]);
+    repeated.name = "1 pk. frisk mozzarella";
+    return { ...response(args.recipes), items: [dealItem(args.recipes), repeated] };
+  };
+  const snapshot = JSON.stringify(items);
+  const result = await fetchShoppingDealMatches({ ...options, items, client });
+  expect(result.warnings.join(" ")).not.toContain("offline");
+  expect(result.matches.map(match => match.itemKey)).toEqual(["carrots:g"]);
+  expect(calls.filter(c => c.name === "recipe")[0]!.args.ingredients.filter((i: { name: string }) => i.name === "1 pk. frisk mozzarella")).toHaveLength(2);
+  expect(JSON.stringify(items)).toBe(snapshot);
+});
+test("provider-distinct raw whitespace variants do not discard unrelated live offers", async () => {
+  const { client } = fake();
+  const items = ingredients();
+  const rawNames = ["400 g. hakkede tomater på dåse", "400 g. hakkede tomater på dåse "];
+  for (const [index, rawText] of rawNames.entries()) {
+    items.push({ key: `tomatoes:${index}`, normalizedIngredient: null, unit: null, requiredQuantity: null, purchaseQuantity: null,
+      pantryDeduction: 0, preparedDeduction: 0, warnings: [],
+      contributions: [{ ...items[0]!.contributions[index]!, rawText, quantity: null, unit: null, preparedDeduction: 0 }] });
+  }
+  client.generateShoppingList = async args => ({ ...response(args.recipes), items: [dealItem(args.recipes),
+    ...rawNames.map((name, index) => ({ ...dealItem([args.recipes[index]!]), name }))] });
+  const result = await fetchShoppingDealMatches({ ...options, items, client });
+  expect(result.warnings.join(" ")).not.toContain("offline");
+  expect(result.matches.map(match => match.itemKey)).toEqual(["carrots:g"]);
 });
 test("fully pantry-covered measured items do not receive shopping matches", async () => {
   const { client } = fake();

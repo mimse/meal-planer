@@ -184,6 +184,32 @@ test("unreviewed candidates do not disable deals for reviewed candidates", async
   expect(result.dealSignals).toHaveLength(1);
   expect(result.warnings.join(" ")).toContain("not planning-ready");
 });
+test("repeated ingredient lines retain live planning deals", async () => {
+  const { client } = fake();
+  const repeated = { ...recipe, ingredients: [recipe.ingredients[0]!, { ...recipe.ingredients[0]!, rawText: "100 g carrots", quantity: 100 }] };
+  client.generateShoppingList = async args => {
+    const response = shopping(args.recipes[0]!);
+    response.items[0]!.sourceRecipes.push(args.recipes[0]!);
+    response.items[0]!.contributions.push({ recipeName: args.recipes[0]!, quantity: "100 g", recipeServings: 4 });
+    return response;
+  };
+  const result = await fetchPlanningDealInputs({ ...options, recipes: [repeated], client });
+  expect(result.warnings.join(" ")).not.toContain("without deals");
+  expect(result.dealSignals).toHaveLength(1);
+  expect(result.packageEstimates).toHaveLength(1);
+});
+test("provider-distinct whitespace variants retain live planning deals", async () => {
+  const { client } = fake();
+  const variants = { ...recipe, ingredients: [recipe.ingredients[0]!, { ...recipe.ingredients[0]!, normalizedName: "carrots " }] };
+  client.generateShoppingList = async args => {
+    const response = shopping(args.recipes[0]!);
+    response.items.push({ ...response.items[0]!, name: "carrots " });
+    return response;
+  };
+  const result = await fetchPlanningDealInputs({ ...options, recipes: [variants], client });
+  expect(result.warnings.join(" ")).not.toContain("without deals");
+  expect(result.dealSignals).toHaveLength(2);
+});
 test("exact pinned identity is checked even if an injected report claims compatible", async () => {
   const { client, calls } = fake();
   client.checkCompatibility = async () => ({ ...compatibility, server: { name: "tilbudstrolden", version: "0.5.4" } });

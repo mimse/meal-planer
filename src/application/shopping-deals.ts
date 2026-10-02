@@ -50,6 +50,10 @@ function offerDate(value: string | null): string | null {
 function sameNames(actual: readonly string[], expected: readonly string[]): boolean {
   return actual.length === expected.length && new Set(actual).size === actual.length && actual.every(name => expected.includes(name));
 }
+function sameOccurrences(actual: readonly string[], expected: readonly string[]): boolean {
+  const sorted = [...expected].sort();
+  return actual.length === expected.length && [...actual].sort().every((name, index) => name === sorted[index]);
+}
 function validateBoundedData(value: unknown, depth = 0, budget = { remaining: 50_000 }): void {
   if (depth > 20 || --budget.remaining < 0) throw new Error("invalid oversized provider response");
   if (typeof value === "number" && (!Number.isFinite(value) || value < 0 || value > 10_000_000)) throw new Error("invalid out-of-range provider number");
@@ -151,7 +155,7 @@ export async function fetchShoppingDealMatches(options: ShoppingDealsOptions): P
       stores: stores.map((store, index) => ({ name: store.name, dealerId: store.dealerId, priority: index + 1 })) }));
     await run(() => active.updatePantry({ add: options.pantry.map(item => item.normalizedName), remove: [] }));
     const names: string[] = [];
-    const associations = new Map<string, Set<string>>();
+    const associations = new Map<string, string[]>();
     for (const meal of options.plan.meals) {
       const recipe = options.recipes.find(recipe => recipe.id === meal.recipeId)!;
       const name = `mealplan:${meal.id}`;
@@ -167,9 +171,13 @@ export async function fetchShoppingDealMatches(options: ShoppingDealsOptions): P
         return contributions.map(c => ({ name: c.rawText, quantity: c.rawText, searchTerms: [c.rawText] }));
       });
       for (const ingredient of ingredients) {
-        const key = normalize(ingredient.name);
-        const sources = associations.get(key) ?? new Set<string>();
-        sources.add(name);
+        // Match collectIngredients in the pinned provider: case-insensitive only.
+        // Trimming raw evidence here conflates distinct provider items.
+        const key = ingredient.name.toLowerCase();
+        // The pinned provider retains one source/contribution per ingredient line,
+        // including repeated raw lines and same-name ingredients in different units.
+        const sources = associations.get(key) ?? [];
+        sources.push(name);
         associations.set(key, sources);
       }
       await run(() => active.addRecipe({ name, servings: options.householdServings,
@@ -190,10 +198,10 @@ export async function fetchShoppingDealMatches(options: ShoppingDealsOptions): P
       || !sameNames(response.availableRecipes, names) || response.skippedPantry.length) throw new Error("invalid recipe identity, household or currency in provider response");
     const seen = new Set<string>();
     for (const item of response.items) {
-      const key = normalize(item.name);
+      const key = item.name.toLowerCase();
       const sources = associations.get(key);
-      if (seen.has(key) || !sources || !sameNames(item.sourceRecipes, [...sources])
-        || !sameNames(item.contributions.map(c => c.recipeName), [...sources])
+      if (seen.has(key) || !sources || !sameOccurrences(item.sourceRecipes, sources)
+        || !sameOccurrences(item.contributions.map(c => c.recipeName), sources)
         || item.contributions.some(c => c.recipeServings !== options.householdServings)) throw new Error("invalid ingredient association or duplicate item");
       seen.add(key);
       for (const deal of [item.deal, ...item.alternatives.map(alternative => alternative.offer)]) {
