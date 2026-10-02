@@ -2,9 +2,10 @@
 
 import { Command } from "commander";
 import { mkdir } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import packageJson from "../package.json";
 import { TilbudstroldenClient } from "./adapters/deals/tilbudstrolden-client";
+import { resolvePlanningServerDirectory } from "./adapters/deals/planning-client";
 import { readFamilyConfiguration, type FamilyEdit } from "./commands/family";
 import { runFamilyEditWorkflow } from "./commands/family-workflow";
 import { inspectRecipeUrl } from "./commands/inspect-recipe";
@@ -41,6 +42,7 @@ import {
 } from "./infrastructure/recipe-repository";
 import { createConfigurationRepositories } from "./infrastructure/configuration-repositories";
 import { resolveDatabasePath } from "./infrastructure/database-path";
+import { createBackupBundle, restoreBackupBundle } from "./infrastructure/backup";
 import { createPlanRepository, type WeeklyPlan } from "./infrastructure/plan-repository";
 import { createPrepLinkRepository, parsePrepLinkInput } from "./infrastructure/prep-link-repository";
 import { ClackPromptAdapter } from "./presentation/prompts";
@@ -737,6 +739,55 @@ plan.command("accept")
     }
   });
 
+const backup = program.command("backup").description("Create and restore verified local-state bundles");
+
+backup.command("create")
+  .description("Create a coherent SQLite backup with optional persistent TilbudsTrolden data")
+  .argument("<bundle-directory>", "new backup bundle directory")
+  .option("--mcp-data <path>", "persistent TilbudsTrolden JSON file to include", collectAtMostTwo, [])
+  .option("--json", "emit stable JSON")
+  .action(async (bundleDirectory: string, options: { mcpData: string[]; json?: boolean }) => {
+    if (bundleDirectory.trim().length === 0) throw new Error("Backup bundle path cannot be empty");
+    const mcpDataPath = singletonOption(options.mcpData, "--mcp-data");
+    const bundlePath = resolve(bundleDirectory);
+    const manifest = await createBackupBundle({
+      databasePath: databasePath(),
+      bundlePath,
+      ...(mcpDataPath === undefined ? {} : { mcpDataPath }),
+    });
+    if (options.json) {
+      process.stdout.write(`${JSON.stringify({ bundlePath, manifest }, null, 2)}\n`);
+    } else {
+      console.log(`Backup created: ${bundlePath}`);
+      if (manifest.mcp.mode === "ephemeral-regenerated") {
+        console.log("Planning MCP sessions are ephemeral and will be regenerated.");
+      }
+    }
+  });
+
+backup.command("restore")
+  .description("Validate and restore a bundle into a new state directory")
+  .argument("<bundle-directory>", "backup bundle directory")
+  .requiredOption("--to <directory>", "new, nonexistent restore directory", collectAtMostTwo, [])
+  .option("--json", "emit stable JSON")
+  .action(async (bundleDirectory: string, options: { to: string[]; json?: boolean }) => {
+    if (bundleDirectory.trim().length === 0) throw new Error("Backup bundle path cannot be empty");
+    const destinationDirectory = singletonOption(options.to, "--to");
+    if (destinationDirectory === undefined || destinationDirectory.trim().length === 0) {
+      throw new Error("Restore destination cannot be empty");
+    }
+    const restored = await restoreBackupBundle({ bundlePath: bundleDirectory, destinationDirectory });
+    if (options.json) {
+      process.stdout.write(`${JSON.stringify(restored, null, 2)}\n`);
+    } else {
+      console.log(`Backup restored: ${restored.databasePath}`);
+      console.log(`Activate with MEALPLAN_DATABASE=${restored.databasePath}`);
+      if (restored.mcpDataPath !== null) {
+        console.log(`Persistent MCP data: TILBUDSTROLDEN_DATA=${restored.mcpDataPath}`);
+      }
+    }
+  });
+
 const integrations = program
   .command("integrations")
   .description("Inspect external recipe and deal integrations");
@@ -744,18 +795,21 @@ const integrations = program
 integrations
   .command("verify-deals")
   .description("Verify compatibility with the pinned TilbudsTrolden MCP server")
-  .option("--server <path>", "server entry point", "vendor/tilbudstrolden-mcp/dist/server.js")
+  .option("--server <path>", "server entry point; defaults to the production sidecar resolver")
   .option("--data <path>", "isolated TilbudsTrolden data file", ".data/tilbudstrolden.json")
   .option("--json", "emit stable JSON")
-  .action(async (options: { server: string; data: string; json?: boolean }) => {
-    const serverPath = resolve(options.server);
+  .action(async (options: { server?: string; data: string; json?: boolean }) => {
+    const serverDirectory = options.server === undefined ? resolvePlanningServerDirectory() : process.cwd();
+    const serverPath = options.server === undefined
+      ? join(serverDirectory, "dist/server.js")
+      : resolve(options.server);
     const dataPath = resolve(options.data);
     await mkdir(dirname(dataPath), { recursive: true });
 
     await using client = new TilbudstroldenClient({
       command: "node",
       args: [serverPath],
-      cwd: process.cwd(),
+      cwd: serverDirectory,
       dataPath,
     });
     const result = await client.checkCompatibility();

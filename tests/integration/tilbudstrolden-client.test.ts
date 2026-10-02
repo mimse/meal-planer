@@ -6,6 +6,7 @@ import { z } from "zod";
 import {
   evaluateCompatibility,
   GenerateShoppingListStructuredContentSchema,
+  parseGenerateShoppingListResponse,
   parseStoreDirectory,
   parseScoreRecipesResponse,
   ScoreRecipesStructuredContentSchema,
@@ -472,6 +473,38 @@ process.stdin.on("end", () => setTimeout(() => process.exit(0), 250));
     }, receivedAt)).toThrow(
       "score_recipes structuredContent validation failed: recipes: Invalid input: expected array, received string",
     );
+  });
+
+  test("throws precise boundary errors for unusable shopping responses", () => {
+    const receivedAt = "2026-09-27T10:00:00.000Z";
+    const validStructuredContent = {
+      status: "ok",
+      requestedRecipes: [],
+      availableRecipes: [],
+      matchedRecipes: [],
+      householdSize: null,
+      currency: null,
+      currencySymbol: null,
+      estimatedTotal: 0,
+      items: [],
+      skippedPantry: [],
+    };
+    expect(() => parseGenerateShoppingListResponse({
+      isError: true,
+      content: [{ type: "text", text: "provider failed" }],
+      structuredContent: validStructuredContent,
+    }, receivedAt)).toThrow("generate_shopping_list returned an MCP error: provider failed");
+    expect(() => parseGenerateShoppingListResponse({
+      content: [],
+      structuredContent: validStructuredContent,
+    }, receivedAt)).toThrow("generate_shopping_list response is missing text content");
+    expect(() => parseGenerateShoppingListResponse({
+      content: [{ type: "text", text: "markdown only" }],
+    }, receivedAt)).toThrow("generate_shopping_list response is missing structuredContent");
+    expect(() => parseGenerateShoppingListResponse({
+      content: [{ type: "text", text: "invalid" }],
+      structuredContent: { ...validStructuredContent, items: "invalid" },
+    }, receivedAt)).toThrow("generate_shopping_list structuredContent validation failed");
   });
 
   test("parses store names and case-sensitive dealer IDs from the text-only protocol", () => {

@@ -13,6 +13,34 @@ test("finds the pinned server from source and bundled CLI layouts", () => {
     .toBe(join(root, "vendor/tilbudstrolden-mcp"));
 });
 
+test("an explicit pinned-server directory override wins over source-layout discovery", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "planning-server-override-"));
+  try {
+    await Bun.write(join(directory, "package.json"), JSON.stringify({ name: "tilbudstrolden-mcp", version: "0.5.3" }));
+    await Bun.write(join(directory, "dist", "server.js"), "// built server");
+    await Bun.write(join(directory, "node_modules", ".runtime-ready"), "ready");
+
+    expect(resolvePlanningServerDirectory(
+      new URL("file:///unrelated/dist/cli.js").href,
+      { MEALPLAN_TILBUDSTROLDEN_DIR: directory },
+    )).toBe(directory);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("an invalid explicit pinned-server directory fails without falling back", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "planning-server-invalid-"));
+  try {
+    expect(() => resolvePlanningServerDirectory(
+      import.meta.url,
+      { MEALPLAN_TILBUDSTROLDEN_DIR: directory },
+    )).toThrow("MEALPLAN_TILBUDSTROLDEN_DIR does not contain a built TilbudsTrolden 0.5.3 runtime");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("production factory isolates concurrent sessions and removes their private MCP files", async () => {
   const { createPlanningDealsClient } = await import("../../src/adapters/deals/planning-client");
   const dir = await mkdtemp(join(tmpdir(), "planning-factory-"));

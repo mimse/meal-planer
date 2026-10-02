@@ -2,17 +2,32 @@
   "name": "meal-planer",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "bun@1.4.0",
+  "engines": {
+    "bun": ">=1.4.0",
+    "node": ">=18"
+  },
   "type": "module",
   "bin": {
-    "mealplan": "./src/cli.ts"
+    "mealplan": "./dist/cli.js"
   },
   "scripts": {
     "start": "bun run src/cli.ts",
     "vendor:install": "npm ci --prefix vendor/tilbudstrolden-mcp && npm run build --prefix vendor/tilbudstrolden-mcp",
     "vendor:test": "npm test --prefix vendor/tilbudstrolden-mcp",
+    "setup:runtime": "bun install --frozen-lockfile && bun run vendor:install && bun run build && bun run smoke:runtime",
+    "smoke:runtime": "bun run scripts/runtime-smoke.ts",
+    "smoke:distribution": "bun test tests/e2e/distribution-cli.test.ts",
     "test": "bun test tests",
+    "test:unit": "bun test tests/unit",
+    "test:integration": "bun test tests/integration",
+    "test:contract": "bun test tests/integration/tilbudstrolden-client.test.ts tests/integration/planning-deals-client.test.ts",
+    "test:property": "bun test tests/property",
+    "test:e2e": "bun test tests/e2e",
     "typecheck": "bunx tsc --noEmit",
-    "build": "bun build src/cli.ts --outdir dist --target bun",
+    "build": "bun run build:bundle",
+    "build:bundle": "bun build src/cli.ts --outdir dist --target bun",
+    "build:compile:experimental": "bun build src/cli.ts --compile --outfile dist/mealplan",
     "verify": "bun run test && bun run typecheck && bun run build"
   },
   "devDependencies": {

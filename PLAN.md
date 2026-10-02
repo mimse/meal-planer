@@ -426,6 +426,10 @@ Exit criterion: an accepted plan produces a complete ingredient list and, when l
 
 ### Phase 6 — hardening and distribution
 
+**Current scope:** Implemented: six source fixture contracts with provenance, deterministic planner property/oracle coverage, pinned MCP input/output contract checks, relocated-bundle and backup CLI end-to-end tests, and stable JSON for planning, shopping, source, recipe, configuration-read, integration, and backup outputs. `backup create` makes an integrity-checked SQLite snapshot and can include one explicitly selected persistent TilbudsTrolden 0.5.3 store; `backup restore` verifies fixed contents, checksums, schemas, migration history, SQLite integrity, and foreign keys before atomically publishing a new state directory. Normal private planning MCP sessions remain derived, ephemeral state. Distribution uses the Bun project with an idempotent `setup:runtime` command, a relocated-bundle smoke test, an explicit sidecar override, and production-path compatibility verification. Installation, source management, planning/replacement, backup/recovery, and troubleshooting are documented.
+
+**Limits:** A compiled Bun executable is experimental and is not the supported distribution because it does not contain the Node.js MCP sidecar or its runtime dependencies. Restore intentionally refuses in-place replacement and publishes only to a new directory. SQLite and an optional independently managed MCP JSON file are validated in one bundle but are not claimed as a cross-file point-in-time transaction. Live deal and six-source network probes remain optional rather than CI requirements.
+
 - Add source fixtures, planner property tests, MCP contract tests, and end-to-end CLI tests.
 - Add backup/recovery behavior for local and MCP data.
 - Add `--json` for the CLI's own structured outputs; keep upstream MCP text as an explicitly labeled field.

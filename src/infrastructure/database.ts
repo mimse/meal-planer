@@ -22,7 +22,7 @@ const REQUIRED_CACHE_TABLES = ["http_cache"] as const;
 const REQUIRED_PLAN_TABLES = ["weekly_plans", "plan_meals", "meal_history"] as const;
 const REQUIRED_REPLACEMENT_TABLES = ["weekly_recipe_rejections", "plan_meal_revisions", "recipe_prep_links"] as const;
 
-function assertApplicationDatabase(database: Database): void {
+export function assertApplicationDatabase(database: Database): void {
   const tableNames = new Set(database
     .query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table'")
     .all()
@@ -51,6 +51,17 @@ function assertApplicationDatabase(database: Database): void {
       throw new Error("Family configuration does not exist. Run mealplan setup first.");
     }
   }
+}
+
+export function assertDatabaseIntegrity(database: Database): void {
+  const quickCheck = database.query<{ quick_check: string }, []>("PRAGMA quick_check").all();
+  if (quickCheck.length !== 1 || quickCheck[0]?.quick_check !== "ok") {
+    throw new Error("Application database integrity check failed");
+  }
+  if (database.query("PRAGMA foreign_key_check").all().length > 0) {
+    throw new Error("Application database foreign-key check failed");
+  }
+  assertApplicationDatabase(database);
 }
 
 export function openDatabase(path: string): Database {

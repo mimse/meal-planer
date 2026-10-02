@@ -2,7 +2,21 @@
 
 A local, family-aware meal-planning CLI for Denmark, built with TypeScript and Bun.
 
-The Phase 0 integration-evidence milestone and Phase 1 local setup are complete. Phase 2 includes durable recipe ingestion, safe bounded discovery, source synchronization, deterministic search/show, and noninteractive review. Phases 3 and 4 add family-aware weekly planning, measured ingredients, verified future prep/leftover links, live preferred-store deal/package inputs, and atomic target-day replacement. Phase 5 adds accepted-plan grocery aggregation, grouped current store offers, package-remainder explanations, and complete offline lists. The Phase 2 live-source exit criterion has not been reverified against all six current websites.
+Phases 0–6 implement integration evidence, durable local setup and recipe ingestion, family-aware weekly planning, atomic one-day replacement, accepted-plan grocery aggregation, verified backup/recovery, planner property checks, MCP contract checks, and project distribution hardening. The Phase 2 live-source exit criterion has not been reverified against all six current websites.
+
+## Installation
+
+The supported distribution is the Bun project plus its pinned Node.js TilbudsTrolden sidecar. A standalone compiled executable remains experimental because it does not package that sidecar or its dependencies.
+
+```sh
+git clone --recurse-submodules https://github.com/mimse/meal-planer.git
+cd meal-planer
+bun run setup:runtime
+bun link
+mealplan --help
+```
+
+See `docs/installation.md` for upgrades, relocated installations, requirements, and verification.
 
 ## Development
 
@@ -12,9 +26,8 @@ Requires Bun 1.4 or newer and Node.js 18 or newer.
 git submodule update --init --recursive
 bun install --frozen-lockfile
 bun run vendor:install
-bun run test
-bun run typecheck
-bun run build
+bun run verify
+bun run smoke:runtime
 bun run src/cli.ts --help
 ```
 
@@ -43,6 +56,8 @@ bun run src/cli.ts plan replace <day> [--week next|YYYY-MM-DD] [--preview] [--no
 bun run src/cli.ts plan replace <day> --with <recipe-id> --yes [--rejection not-this-week|disliked|none] [--no-deals] [--json]
 bun run src/cli.ts plan lock|unlock <day> [--week next|YYYY-MM-DD] [--json]
 bun run src/cli.ts shopping-list [--week next|YYYY-MM-DD] [--refresh-deals|--no-deals] [--json]
+bun run src/cli.ts backup create <new-bundle-directory> [--mcp-data <persistent-json>] [--json]
+bun run src/cli.ts backup restore <bundle-directory> --to <new-state-directory> [--json]
 bun run src/cli.ts recipes prep-link <recipe-id> --target-meal <id> --ingredient <name> --quantity <n> --unit g|ml|stk --note <text> [--kind prep|leftover] [--json]
 bun run src/cli.ts recipes remove-prep-link <link-id>
 bun run src/cli.ts recipes inspect <recipe-url> --json
@@ -115,5 +130,13 @@ The database path is resolved in this order:
 3. `$XDG_DATA_HOME/mealplaner/mealplan.sqlite`, or `~/.local/share/mealplaner/mealplan.sqlite` when `XDG_DATA_HOME` is unset.
 
 Relative explicit or environment paths are resolved from the current working directory. Parent directories are created only by commands that use the database.
+
+Operational guides:
+
+- `docs/installation.md`: install, upgrade, runtime layout, and verification.
+- `docs/source-management.md`: add, test, synchronize, review, disable, and remove sources.
+- `docs/workflows.md`: setup through accepted plan, replacement, and grocery list.
+- `docs/backup-and-recovery.md`: verified bundle creation and new-directory restore.
+- `docs/troubleshooting.md`: sidecar, source, database, planner, and shopping failures.
 
 See `PLAN.md` for the implementation plan, `DESIGN.md` for the domain and CLI design, and `docs/phase-0.md` for verified integration findings.
